@@ -1,0 +1,47 @@
+name: sim_card_scanner
+description: 流量卡编号扫描工具 - 支持批量扫描和本地存储
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # 摄像头
+  camera: ^0.10.5+9
+  
+  # 文字识别 (Google ML Kit - 支持离线)
+  google_mlkit_text_recognition: ^0.11.0
+  
+  # 本地数据库
+  sqflite: ^2.3.0
+  path: ^1.8.3
+  
+  # 权限管理
+  permission_handler: ^11.1.0
+  
+  # 分享/导出
+  share_plus: ^7.2.1
+  
+  # CSV 导出
+  csv: ^5.1.1
+  
+  # 状态管理
+  provider: ^6.1.1
+  
+  # 时间格式化
+  intl: ^0.18.1
+  
+  # 图标
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
