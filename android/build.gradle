@@ -13,6 +13,18 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Force all subprojects to use SDK 35
+subprojects {
+    afterEvaluate {
+        if (project.hasProperty("android")) {
+            project.android.compileSdkVersion 35
+            if (project.android.defaultConfig != null) {
+                project.android.defaultConfig.targetSdkVersion 35
+            }
+        }
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.buildDir
 }

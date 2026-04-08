@@ -20,7 +20,7 @@ android {
     defaultConfig {
         applicationId "com.example.sim_card_scanner"
         minSdkVersion 21
-        targetSdkVersion 34
+        targetSdkVersion 35
         versionCode 1
         versionName "1.0"
     }
