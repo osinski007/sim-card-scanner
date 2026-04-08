@@ -102,7 +102,6 @@ sim_card_scanner/
 └── README.md
 ```
 
-
 ## 🛠️ 技术栈
 - **Flutter** - 跨平台 UI 框架
 - **Google ML Kit** - 文字识别(离线)
