@@ -30,8 +30,14 @@ class _HomeScreenState extends State<HomeScreen> {
     return Scaffold(
       body: IndexedStack(
         index: _currentIndex,
-        children: const [
-          _DashboardTab(),
+        children: [
+          _DashboardTab(
+            onNavigate: (index) {
+              setState(() {
+                _currentIndex = index;
+              });
+            },
+          ),
           ScannerScreen(),
           HistoryScreen(),
         ],
@@ -67,7 +73,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
 /// 概览标签页
 class _DashboardTab extends StatelessWidget {
-  const _DashboardTab();
+  final Function(int) onNavigate;
+
+  const _DashboardTab({required this.onNavigate});
 
   @override
   Widget build(BuildContext context) {
@@ -137,9 +145,7 @@ class _DashboardTab extends StatelessWidget {
                   title: const Text('开始扫描'),
                   subtitle: const Text('打开摄像头识别卡号'),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    // 切换到扫描页
-                  },
+                  onTap: () => onNavigate(1),  // 切换到扫描页
                 ),
                 
                 ListTile(
@@ -154,9 +160,7 @@ class _DashboardTab extends StatelessWidget {
                   title: const Text('查看记录'),
                   subtitle: const Text('查看所有扫描记录'),
                   trailing: const Icon(Icons.chevron_right),
-                  onTap: () {
-                    // 切换到记录页
-                  },
+                  onTap: () => onNavigate(2),  // 切换到记录页
                 ),
                 
                 const Spacer(),

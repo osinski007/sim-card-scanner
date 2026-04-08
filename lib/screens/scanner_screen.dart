@@ -16,7 +16,7 @@ class ScannerScreen extends StatefulWidget {
   State<ScannerScreen> createState() => _ScannerScreenState();
 }
 
-class _ScannerScreenState extends State<ScannerScreen> {
+class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserver {
   CameraController? _cameraController;
   TextRecognizer? _textRecognizer;
   
@@ -30,7 +30,45 @@ class _ScannerScreenState extends State<ScannerScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initCamera();
+  }
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    debugPrint('App生命周期状态变化: $state');
+    
+    switch (state) {
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.paused:
+        // 应用进入后台或屏幕熄灭，释放相机资源
+        if (_cameraController != null && _isInitialized) {
+          debugPrint('释放相机资源');
+          _cameraController?.dispose();
+          _cameraController = null;
+          setState(() {
+            _isInitialized = false;
+          });
+        }
+        break;
+      case AppLifecycleState.resumed:
+        // 应用恢复，重新初始化相机
+        debugPrint('重新初始化相机');
+        if (!_isInitialized) {
+          _initCamera();
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _cameraController?.dispose();
+    _textRecognizer?.close();
+    super.dispose();
   }
 
   Future<void> _initCamera() async {
@@ -64,11 +102,18 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
       _cameraController = CameraController(
         backCamera,
-        ResolutionPreset.high,
+        ResolutionPreset.veryHigh,  // 使用最高分辨率
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.jpeg,  // 指定JPEG格式
       );
 
       await _cameraController!.initialize();
+      
+      // 设置自动对焦
+      await _cameraController!.setFocusMode(FocusMode.auto);
+      // 设置自动曝光
+      await _cameraController!.setExposureMode(ExposureMode.auto);
+      
       _textRecognizer = TextRecognizer();
       
       setState(() => _isInitialized = true);
@@ -89,8 +134,25 @@ class _ScannerScreenState extends State<ScannerScreen> {
     });
 
     try {
+      // 拍照前先锁定对焦和曝光，确保图像清晰
+      try {
+        await _cameraController!.setFocusMode(FocusMode.locked);
+        await _cameraController!.setExposureMode(ExposureMode.locked);
+        // 等待100ms让相机稳定
+        await Future.delayed(const Duration(milliseconds: 100));
+      } catch (_) {
+        // 某些设备不支持锁定，忽略错误
+      }
+      
       // 拍照
       final image = await _cameraController!.takePicture();
+      
+      // 拍照后恢复自动对焦和曝光
+      try {
+        await _cameraController!.setFocusMode(FocusMode.auto);
+        await _cameraController!.setExposureMode(ExposureMode.auto);
+      } catch (_) {}
+      
       final file = File(image.path);
       
       // 使用 ML Kit 识别图片
@@ -103,6 +165,17 @@ class _ScannerScreenState extends State<ScannerScreen> {
       debugPrint('===================');
       
       _recognizedText = text;
+      
+      // 删除临时图片
+      try {
+        await file.delete();
+      } catch (_) {}
+      
+      // 恢复自动对焦和自动曝光，为下次拍照做准备
+      try {
+        await _cameraController!.setFocusMode(FocusMode.auto);
+        await _cameraController!.setExposureMode(ExposureMode.auto);
+      } catch (_) {}
 
       // 提取 ICCID
       final iccid = _extractIccid(text);
@@ -122,15 +195,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
             const SnackBar(
               content: Text('未识别到有效卡号，请重新拍照'),
               backgroundColor: Colors.orange,
+              duration: Duration(seconds: 2),
             ),
           );
         }
       }
-      
-      // 删除临时图片
-      try {
-        await file.delete();
-      } catch (_) {}
 
     } catch (e) {
       debugPrint('识别错误: $e');
@@ -185,9 +254,60 @@ class _ScannerScreenState extends State<ScannerScreen> {
     
     return null;
   }
+  
+  /// 点击对焦
+  Future<void> _onTapDown(TapDownDetails details) async {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
+    
+    try {
+      // 获取点击位置
+      final RenderBox box = context.findRenderObject() as RenderBox;
+      final localPosition = box.globalToLocal(details.globalPosition);
+      
+      // 计算相对位置
+      final size = MediaQuery.of(context).size;
+      final x = localPosition.dx / size.width;
+      final y = localPosition.dy / size.height;
+      
+      // 设置对焦点
+      await _cameraController!.setFocusPoint(Offset(x, y));
+      await _cameraController!.setExposurePoint(Offset(x, y));
+      
+      debugPrint('对焦到: ($x, $y)');
+      
+      // 短暂震动反馈
+      HapticFeedback.lightImpact();
+    } catch (e) {
+      debugPrint('对焦失败: $e');
+    }
+  }
 
   Future<void> _saveRecord() async {
     if (_extractedNumber == null) return;
+
+    // 检查是否已存在相同卡号
+    final provider = context.read<ScanProvider>();
+    final exists = provider.records.any((r) => r.cardNumber == _extractedNumber);
+    
+    if (exists) {
+      // 卡号已存在，显示提示
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('卡号已存在'),
+            content: Text('卡号 $_extractedNumber 已在记录中，无需重复保存。'),
+            actions: [
+              TextButton(
+                child: const Text('确定'),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+        );
+      }
+      return;
+    }
 
     final record = ScanRecord(
       cardNumber: _extractedNumber!,
@@ -195,7 +315,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
       scannedAt: DateTime.now(),
     );
 
-    final success = await context.read<ScanProvider>().addRecord(record);
+    final success = await provider.addRecord(record);
     
     if (success && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -299,10 +419,12 @@ class _ScannerScreenState extends State<ScannerScreen> {
           // 摄像头预览
           Expanded(
             flex: 3,
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                CameraPreview(_cameraController!),
+            child: GestureDetector(
+              onTapDown: _onTapDown,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  CameraPreview(_cameraController!),
                 
                 // 扫描框
                 Center(

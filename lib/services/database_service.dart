@@ -137,7 +137,7 @@ class DatabaseService {
       final r = records[i];
       buffer.writeln([
         i + 1,
-        r.cardNumber,
+        '="${r.cardNumber}"',  // 用 ="xxx" 格式，Excel会当作文本
         r.scannedAt.toString(),
         r.notes ?? '',
       ].join(','));
