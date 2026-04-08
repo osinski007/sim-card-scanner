@@ -223,7 +223,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
           Text(
             label,
             style: TextStyle(
-              color: color.shade700 ?? color,
+              color: color.withOpacity(0.8),
               fontWeight: FontWeight.w500,
             ),
           ),
