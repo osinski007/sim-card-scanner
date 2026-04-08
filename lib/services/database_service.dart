@@ -126,6 +126,9 @@ class DatabaseService {
     final records = await getAllRecords();
     final buffer = StringBuffer();
     
+    // 添加 UTF-8 BOM，让 Excel 正确识别中文
+    buffer.write('\ufeff');
+    
     // CSV 头
     buffer.writeln('序号,卡号,扫描时间,备注');
     
