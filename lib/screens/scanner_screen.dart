@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -17,63 +18,78 @@ class ScannerScreen extends StatefulWidget {
 
 class _ScannerScreenState extends State<ScannerScreen> {
   CameraController? _cameraController;
-  late final TextRecognizer _textRecognizer;
+  TextRecognizer? _textRecognizer;
   
   bool _isProcessing = false;
   bool _hasPermission = false;
+  bool _isInitialized = false;
   String? _lastRecognizedText;
   String? _extractedNumber;
-  List<CameraDescription> _cameras = [];
+  CameraDescription? _camera;
+  String? _errorMsg;
 
   @override
   void initState() {
     super.initState();
-    _textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
     _initCamera();
   }
 
   Future<void> _initCamera() async {
     // 检查权限
-    final status = await Permission.camera.request();
+    var status = await Permission.camera.status;
     if (!status.isGranted) {
-      setState(() => _hasPermission = false);
+      status = await Permission.camera.request();
+    }
+    
+    if (!status.isGranted) {
+      setState(() {
+        _hasPermission = false;
+        _errorMsg = '需要相机权限才能扫描';
+      });
       return;
     }
     
     setState(() => _hasPermission = true);
 
     try {
-      _cameras = await availableCameras();
-      if (_cameras.isEmpty) {
-        _showError('未找到摄像头');
+      // 获取可用摄像头
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        setState(() => _errorMsg = '未找到摄像头');
         return;
       }
 
       // 使用后置摄像头
-      final backCamera = _cameras.firstWhere(
+      _camera = cameras.firstWhere(
         (cam) => cam.lensDirection == CameraLensDirection.back,
-        orElse: () => _cameras.first,
+        orElse: () => cameras.first,
       );
 
       _cameraController = CameraController(
-        backCamera,
+        _camera!,
         ResolutionPreset.high,
         enableAudio: false,
+        imageFormatGroup: ImageFormatGroup.nv21, // Android 使用 NV21 格式
       );
 
       await _cameraController!.initialize();
       
-      // 开始图像流
-      _cameraController!.startImageStream(_processImage);
+      // 初始化文字识别器
+      _textRecognizer = TextRecognizer();
       
-      setState(() {});
+      setState(() => _isInitialized = true);
+      
+      // 开始图像流
+      await _cameraController!.startImageStream(_processImage);
+      
     } catch (e) {
-      _showError('初始化摄像头失败: $e');
+      debugPrint('初始化摄像头失败: $e');
+      setState(() => _errorMsg = '初始化摄像头失败: $e');
     }
   }
 
   Future<void> _processImage(CameraImage image) async {
-    if (_isProcessing) return;
+    if (_isProcessing || _textRecognizer == null || _camera == null) return;
     
     _isProcessing = true;
 
@@ -84,21 +100,27 @@ class _ScannerScreenState extends State<ScannerScreen> {
         return;
       }
 
-      final recognizedText = await _textRecognizer.processImage(inputImage);
+      final recognizedText = await _textRecognizer!.processImage(inputImage);
       final text = recognizedText.text;
+      
+      debugPrint('识别到文字: $text');
 
-      // 提取数字（流量卡号通常是纯数字）
+      // 提取数字（流量卡号通常是纯数字，8-20位）
       final numberMatch = RegExp(r'\d{8,20}').firstMatch(text);
       final extractedNumber = numberMatch?.group(0);
 
       if (extractedNumber != null && extractedNumber != _lastRecognizedText) {
+        debugPrint('提取到卡号: $extractedNumber');
         setState(() {
-          _lastRecognizedText = text;
+          _lastRecognizedText = extractedNumber;
           _extractedNumber = extractedNumber;
         });
         
         // 震动反馈
         HapticFeedback.mediumImpact();
+      } else if (text.isNotEmpty) {
+        // 显示识别到的文字（调试用）
+        debugPrint('未匹配到卡号，原文: $text');
       }
     } catch (e) {
       debugPrint('识别错误: $e');
@@ -109,29 +131,61 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   InputImage? _convertToInputImage(CameraImage image) {
     try {
-      final camera = _cameras.firstWhere(
-        (cam) => cam.lensDirection == CameraLensDirection.back,
-        orElse: () => _cameras.first,
-      );
-
-      final rotation = InputImageRotationValue.fromRawValue(camera.sensorOrientation);
-      if (rotation == null) return null;
-
-      final format = InputImageFormatValue.fromRawValue(image.format.raw);
-      if (format == null) return null;
-
-      final plane = image.planes.first;
+      if (_camera == null) return null;
       
+      final camera = _camera!;
+      final rotation = InputImageRotationValue.fromRawValue(camera.sensorOrientation);
+      if (rotation == null) {
+        debugPrint('无效的旋转角度: ${camera.sensorOrientation}');
+        return null;
+      }
+
+      // 获取图像格式
+      final format = InputImageFormatValue.fromRawValue(image.format.raw);
+      if (format == null) {
+        debugPrint('无效的图像格式: ${image.format.raw}');
+        return null;
+      }
+
+      // NV21 格式处理
+      if (format == InputImageFormat.nv21) {
+        return InputImage.fromBytes(
+          bytes: image.planes[0].bytes,
+          metadata: InputImageMetadata(
+            size: Size(image.width.toDouble(), image.height.toDouble()),
+            rotation: rotation,
+            format: format,
+            bytesPerRow: image.planes[0].bytesPerRow,
+          ),
+        );
+      }
+      
+      // YUV_420_888 格式处理 (某些设备)
+      if (format == InputImageFormat.yuv420) {
+        final plane = image.planes[0];
+        return InputImage.fromBytes(
+          bytes: plane.bytes,
+          metadata: InputImageMetadata(
+            size: Size(image.width.toDouble(), image.height.toDouble()),
+            rotation: rotation,
+            format: format,
+            bytesPerRow: plane.bytesPerRow,
+          ),
+        );
+      }
+      
+      // 其他格式尝试
       return InputImage.fromBytes(
-        bytes: plane.bytes,
+        bytes: image.planes[0].bytes,
         metadata: InputImageMetadata(
           size: Size(image.width.toDouble(), image.height.toDouble()),
           rotation: rotation,
           format: format,
-          bytesPerRow: plane.bytesPerRow,
+          bytesPerRow: image.planes[0].bytesPerRow,
         ),
       );
     } catch (e) {
+      debugPrint('转换图像失败: $e');
       return null;
     }
   }
@@ -175,12 +229,13 @@ class _ScannerScreenState extends State<ScannerScreen> {
   @override
   void dispose() {
     _cameraController?.dispose();
-    _textRecognizer.close();
+    _textRecognizer?.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    // 无权限
     if (!_hasPermission) {
       return Scaffold(
         appBar: AppBar(title: const Text('扫描')),
@@ -190,7 +245,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
             children: [
               const Icon(Icons.camera_alt, size: 64, color: Colors.grey),
               const SizedBox(height: 16),
-              const Text('需要相机权限'),
+              Text(_errorMsg ?? '需要相机权限'),
               const SizedBox(height: 16),
               ElevatedButton(
                 onPressed: () => openAppSettings(),
@@ -202,10 +257,50 @@ class _ScannerScreenState extends State<ScannerScreen> {
       );
     }
 
-    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+    // 错误状态
+    if (_errorMsg != null) {
       return Scaffold(
         appBar: AppBar(title: const Text('扫描')),
-        body: const Center(child: CircularProgressIndicator()),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.error_outline, size: 64, color: Colors.red),
+                const SizedBox(height: 16),
+                Text(_errorMsg!, textAlign: TextAlign.center),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      _errorMsg = null;
+                    });
+                    _initCamera();
+                  },
+                  child: const Text('重试'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    // 加载中
+    if (!_isInitialized || _cameraController == null) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('扫描')),
+        body: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('正在初始化摄像头...'),
+            ],
+          ),
+        ),
       );
     }
 
