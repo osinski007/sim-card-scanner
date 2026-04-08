@@ -6,16 +6,12 @@ allprojects {
 }
 
 rootProject.buildDir = "../build"
+
 subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
-}
-subprojects {
-    project.evaluationDependsOn(":app")
-}
-
-// Force all subprojects to use SDK 35
-subprojects {
-    afterEvaluate {
+    
+    // Force all subprojects to use SDK 35 (must be before evaluation)
+    project.afterEvaluate {
         if (project.hasProperty("android")) {
             project.android.compileSdkVersion 35
             if (project.android.defaultConfig != null) {
@@ -23,6 +19,10 @@ subprojects {
             }
         }
     }
+}
+
+subprojects {
+    project.evaluationDependsOn(":app")
 }
 
 tasks.register("clean", Delete) {
