@@ -72,7 +72,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
       await _cameraController!.initialize();
       
-      // 初始化文字识别器（使用默认设置）
+      // 初始化文字识别器
       _textRecognizer = TextRecognizer();
       
       setState(() => _isInitialized = true);
@@ -90,7 +90,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
   void _startImageStream() {
     _cameraController?.startImageStream((CameraImage image) async {
       _frameCount++;
-      // 每5帧处理一次，避免卡顿
+      // 每5帧处理一次
       if (_frameCount % 5 != 0) return;
       await _processImage(image);
     });
@@ -156,7 +156,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
           iccid = allDigits.substring(0, allDigits.length >= 20 ? 20 : allDigits.length);
           debugPrint('方法3匹配到ICCID: $iccid');
         } else if (allDigits.length >= 19) {
-          // 找8986开头的部分
           final idx = allDigits.indexOf('8986');
           if (idx >= 0 && allDigits.length - idx >= 19) {
             iccid = allDigits.substring(idx, idx + 19);
@@ -170,7 +169,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
         setState(() {
           _extractedNumber = iccid;
         });
-        // 震动反馈
         HapticFeedback.mediumImpact();
       }
       
@@ -184,7 +182,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   InputImage? _createInputImage(CameraImage image, CameraDescription camera) {
     try {
-      // 计算旋转角度
       final sensorOrientation = camera.sensorOrientation;
       final rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
       if (rotation == null) {
@@ -192,7 +189,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
         return null;
       }
 
-      // 获取图像格式
       final format = InputImageFormatValue.fromRawValue(image.format.raw);
       if (format == null) {
         debugPrint('无效的图像格式: ${image.format.raw}');
@@ -201,7 +197,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
       
       debugPrint('图像格式: $format, 尺寸: ${image.width}x${image.height}, 旋转: $rotation');
 
-      // 构建 InputImage
       final plane = image.planes[0];
       
       return InputImage.fromBytes(
@@ -239,7 +234,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
         ),
       );
       
-      // 清空当前识别结果
       setState(() {
         _extractedNumber = null;
       });
@@ -255,7 +249,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // 无权限
     if (!_hasPermission) {
       return Scaffold(
         appBar: AppBar(title: const Text('扫描')),
@@ -277,7 +270,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
       );
     }
 
-    // 错误状态
     if (_errorMsg != null) {
       return Scaffold(
         appBar: AppBar(title: const Text('扫描')),
@@ -308,7 +300,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
       );
     }
 
-    // 加载中
     if (!_isInitialized || _cameraController == null) {
       return Scaffold(
         appBar: AppBar(title: const Text('扫描')),
@@ -316,9 +307,9 @@ class _ScannerScreenState extends State<ScannerScreen> {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              CircularProgressIndicator(),
-              SizedBox(height: 16),
-              Text('正在初始化摄像头...'),
+              const CircularProgressIndicator(),
+              const SizedBox(height: 16),
+              const Text('正在初始化摄像头...'),
             ],
           ),
         ),
@@ -351,7 +342,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
               children: [
                 CameraPreview(_cameraController!),
                 
-                // 扫描框
+                // 扫描框 - 简单的矩形边框
                 Center(
                   child: Container(
                     width: 300,
@@ -362,20 +353,6 @@ class _ScannerScreenState extends State<ScannerScreen> {
                         width: 3,
                       ),
                       borderRadius: BorderRadius.circular(8),
-                      color: Colors.transparent,
-                    ),
-                  ),
-                ),
-                
-                // 角落装饰
-                Center(
-                  child: SizedBox(
-                    width: 300,
-                    height: 80,
-                    child: CustomPaint(
-                      painter: _CornerPainter(
-                        color: _extractedNumber != null ? Colors.green : Colors.orange,
-                      ),
                     ),
                   ),
                 ),
@@ -474,40 +451,4 @@ class _ScannerScreenState extends State<ScannerScreen> {
       ),
     );
   }
-}
-
-/// 角落装饰画笔
-class _CornerPainter extends CustomPainter {
-  final Color color;
-  
-  _CornerPainter({required this.color});
-  
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 4
-      ..style = PaintingStyle.stroke;
-    
-    const cornerLength = 20.0;
-    
-    // 左上角
-    canvas.drawLine(const Offset(0, 20.0), Offset.zero, paint);
-    canvas.drawLine(Offset.zero, const Offset(20.0, 0), paint);
-    
-    // 右上角
-    canvas.drawLine(Offset(size.width - 20.0, 0), Offset(size.width, 0), paint);
-    canvas.drawLine(Offset(size.width, 0), Offset(size.width, 15.0), paint);
-    
-    // 左下角
-    canvas.drawLine(Offset(0, size.height - 15.0), const Offset(0, size.height), paint);
-    canvas.drawLine(const Offset(0, size.height), Offset(15.0, size.height), paint);
-    
-    // 右下角
-    canvas.drawLine(Offset(size.width - 15.0, size.height), Offset(size.width, size.height), paint);
-    canvas.drawLine(Offset(size.width, size.height - cornerLength), Offset(size.width, size.height), paint);
-  }
-  
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
