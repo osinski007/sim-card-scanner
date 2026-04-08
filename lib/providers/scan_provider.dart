@@ -22,7 +22,6 @@ class ScanProvider extends ChangeNotifier {
   /// 加载所有记录
   Future<void> loadRecords() async {
     _isLoading = true;
-    _error = null;
     notifyListeners();
 
     try {
@@ -42,7 +41,8 @@ class ScanProvider extends ChangeNotifier {
   /// 添加新记录
   Future<bool> addRecord(ScanRecord record) async {
     try {
-      await _db.insertRecord(record);
+      final id = await _db.insertRecord(record);
+      debugPrint('插入记录成功, ID: $id');
       await loadRecords(); // 刷新列表
       return true;
     } catch (e) {
