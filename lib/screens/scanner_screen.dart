@@ -41,7 +41,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     switch (state) {
       case AppLifecycleState.inactive:
       case AppLifecycleState.paused:
-        // 应用进入后台或屏幕熄灭，释放相机资源
         if (_cameraController != null && _isInitialized) {
           debugPrint('释放相机资源');
           _cameraController?.dispose();
@@ -52,7 +51,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
         }
         break;
       case AppLifecycleState.resumed:
-        // 应用恢复，重新初始化相机
         debugPrint('重新初始化相机');
         if (!_isInitialized) {
           _initCamera();
@@ -72,7 +70,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
   }
 
   Future<void> _initCamera() async {
-    // 检查权限
     var status = await Permission.camera.status;
     if (!status.isGranted) {
       status = await Permission.camera.request();
@@ -102,20 +99,16 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
 
       _cameraController = CameraController(
         backCamera,
-        ResolutionPreset.veryHigh,  // 使用最高分辨率
+        ResolutionPreset.veryHigh,
         enableAudio: false,
-        imageFormatGroup: ImageFormatGroup.jpeg,  // 指定JPEG格式
+        imageFormatGroup: ImageFormatGroup.jpeg,
       );
 
       await _cameraController!.initialize();
-      
-      // 设置自动对焦
       await _cameraController!.setFocusMode(FocusMode.auto);
-      // 设置自动曝光
       await _cameraController!.setExposureMode(ExposureMode.auto);
       
       _textRecognizer = TextRecognizer();
-      
       setState(() => _isInitialized = true);
     } catch (e) {
       debugPrint('初始化摄像头失败: $e');
@@ -134,50 +127,33 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     });
 
     try {
-      // 拍照前先锁定对焦和曝光，确保图像清晰
       try {
         await _cameraController!.setFocusMode(FocusMode.locked);
         await _cameraController!.setExposureMode(ExposureMode.locked);
-        // 等待100ms让相机稳定
         await Future.delayed(const Duration(milliseconds: 100));
-      } catch (_) {
-        // 某些设备不支持锁定，忽略错误
-      }
+      } catch (_) {}
       
-      // 拍照
       final image = await _cameraController!.takePicture();
       
-      // 拍照后恢复自动对焦和曝光
       try {
         await _cameraController!.setFocusMode(FocusMode.auto);
         await _cameraController!.setExposureMode(ExposureMode.auto);
       } catch (_) {}
       
       final file = File(image.path);
-      
-      // 使用 ML Kit 识别图片
       final inputImage = InputImage.fromFile(file);
       final recognizedText = await _textRecognizer!.processImage(inputImage);
       final text = recognizedText.text;
       
       debugPrint('=== 识别到的文字 ===');
       debugPrint(text);
-      debugPrint('===================');
       
       _recognizedText = text;
       
-      // 删除临时图片
       try {
         await file.delete();
       } catch (_) {}
-      
-      // 恢复自动对焦和自动曝光，为下次拍照做准备
-      try {
-        await _cameraController!.setFocusMode(FocusMode.auto);
-        await _cameraController!.setExposureMode(ExposureMode.auto);
-      } catch (_) {}
 
-      // 提取 ICCID
       final iccid = _extractIccid(text);
       
       if (iccid != null) {
@@ -200,7 +176,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
           );
         }
       }
-
     } catch (e) {
       debugPrint('识别错误: $e');
       if (mounted) {
@@ -215,22 +190,17 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     });
   }
 
-  /// 从识别文字中提取ICCID
   String? _extractIccid(String text) {
     if (text.isEmpty) return null;
     
-    // 方法1: 直接匹配8986开头的19-20位数字
+    // 方法1: 直接匹配
     final directMatch = RegExp(r'8986\d{15,16}').firstMatch(text);
-    if (directMatch != null) {
-      return directMatch.group(0);
-    }
+    if (directMatch != null) return directMatch.group(0);
     
-    // 方法2: 移除所有空白后匹配
+    // 方法2: 移除空白后匹配
     final noSpaceText = text.replaceAll(RegExp(r'\s'), '');
     final noSpaceMatch = RegExp(r'8986\d{15,16}').firstMatch(noSpaceText);
-    if (noSpaceMatch != null) {
-      return noSpaceMatch.group(0);
-    }
+    if (noSpaceMatch != null) return noSpaceMatch.group(0);
     
     // 方法3: 提取所有数字后匹配
     final allDigits = text.replaceAll(RegExp(r'[^\d]'), '');
@@ -255,27 +225,18 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     return null;
   }
   
-  /// 点击对焦
   Future<void> _onTapDown(TapDownDetails details) async {
     if (_cameraController == null || !_cameraController!.value.isInitialized) return;
     
     try {
-      // 获取点击位置
       final RenderBox box = context.findRenderObject() as RenderBox;
       final localPosition = box.globalToLocal(details.globalPosition);
-      
-      // 计算相对位置
       final size = MediaQuery.of(context).size;
       final x = localPosition.dx / size.width;
       final y = localPosition.dy / size.height;
       
-      // 设置对焦点
       await _cameraController!.setFocusPoint(Offset(x, y));
       await _cameraController!.setExposurePoint(Offset(x, y));
-      
-      debugPrint('对焦到: ($x, $y)');
-      
-      // 短暂震动反馈
       HapticFeedback.lightImpact();
     } catch (e) {
       debugPrint('对焦失败: $e');
@@ -285,12 +246,10 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
   Future<void> _saveRecord() async {
     if (_extractedNumber == null) return;
 
-    // 检查是否已存在相同卡号
     final provider = context.read<ScanProvider>();
     final exists = provider.records.any((r) => r.cardNumber == _extractedNumber);
     
     if (exists) {
-      // 卡号已存在，显示提示
       if (mounted) {
         showDialog(
           context: context,
@@ -331,13 +290,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
         _recognizedText = null;
       });
     }
-  }
-
-  @override
-  void dispose() {
-    _cameraController?.dispose();
-    _textRecognizer?.close();
-    super.dispose();
   }
 
   @override
@@ -416,7 +368,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
       ),
       body: Column(
         children: [
-          // 摄像头预览
           Expanded(
             flex: 3,
             child: GestureDetector(
@@ -425,61 +376,48 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
                 fit: StackFit.expand,
                 children: [
                   CameraPreview(_cameraController!),
-                
-                // 扫描框
-                Center(
-                  child: Container(
-                    width: 300,
-                    height: 80,
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: Colors.white,
-                        width: 2,
-                      ),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                ),
-                
-                // 提示文字
-                const Positioned(
-                  bottom: 16,
-                  left: 0,
-                  right: 0,
-                  child: Center(
-                    child: Text(
-                      '将ICCID对准框内，点击拍照按钮',
-                      style: TextStyle(
-                        color: Colors.white,
-                        backgroundColor: Colors.black54,
+                  Center(
+                    child: Container(
+                      width: 300,
+                      height: 80,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.white, width: 2),
+                        borderRadius: BorderRadius.circular(8),
                       ),
                     ),
                   ),
-                ),
-                
-                // 处理中遮罩
-                if (_isProcessing)
-                  Container(
-                    color: Colors.black54,
-                    child: const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircularProgressIndicator(color: Colors.white),
-                          SizedBox(height: 16),
-                          Text(
-                            '正在识别...',
-                            style: TextStyle(color: Colors.white),
-                          ),
-                        ],
+                  const Positioned(
+                    bottom: 16,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: Text(
+                        '将ICCID对准框内，点击拍照按钮',
+                        style: TextStyle(
+                          color: Colors.white,
+                          backgroundColor: Colors.black54,
+                        ),
                       ),
                     ),
                   ),
-              ],
+                  if (_isProcessing)
+                    Container(
+                      color: Colors.black54,
+                      child: const Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            CircularProgressIndicator(color: Colors.white),
+                            SizedBox(height: 16),
+                            Text('正在识别...', style: TextStyle(color: Colors.white)),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
           ),
-          
-          // 识别结果
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(20),
@@ -496,10 +434,7 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  '识别结果',
-                  style: Theme.of(context).textTheme.titleSmall,
-                ),
+                Text('识别结果', style: Theme.of(context).textTheme.titleSmall),
                 const SizedBox(height: 8),
                 Text(
                   _extractedNumber ?? '点击下方按钮拍照识别',
@@ -511,8 +446,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
                   ),
                 ),
                 const SizedBox(height: 16),
-                
-                // 拍照按钮
                 SizedBox(
                   width: double.infinity,
                   child: ElevatedButton.icon(
@@ -526,8 +459,6 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
                     ),
                   ),
                 ),
-                
-                // 保存按钮（识别成功后显示）
                 if (_extractedNumber != null) ...[
                   const SizedBox(height: 12),
                   Row(
