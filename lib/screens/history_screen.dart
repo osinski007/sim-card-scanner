@@ -193,7 +193,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
   }
 
   void _deleteRecord(BuildContext context, ScanRecord record) async {
-    final confirmed = await showDialog<bool>(
+    await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('确认删除'),
