@@ -45,7 +45,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               const PopupMenuItem(
                 value: 'export_text',
                 child: Row(
-                  children: [
+                  children: const [
                     Icon(Icons.text_snippet),
                     SizedBox(width: 12),
                     Text('导出为文本'),
@@ -55,7 +55,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               const PopupMenuItem(
                 value: 'export_csv',
                 child: Row(
-                  children: [
+                  children: const [
                     Icon(Icons.table_chart),
                     SizedBox(width: 12),
                     Text('导出为CSV'),
@@ -65,7 +65,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               const PopupMenuItem(
                 value: 'save_local',
                 child: Row(
-                  children: [
+                  children: const [
                     Icon(Icons.save_alt),
                     SizedBox(width: 12),
                     Text('保存到本地'),
@@ -76,7 +76,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
               const PopupMenuItem(
                 value: 'clear_all',
                 child: Row(
-                  children: [
+                  children: const [
                     Icon(Icons.delete_sweep, color: Colors.red),
                     SizedBox(width: 12),
                     Text('清空所有', style: TextStyle(color: Colors.red)),
@@ -298,7 +298,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     );
   }
 
-  void _deleteRecord(BuildContext context, ScanRecord record) async {
+  Future<void> _deleteRecord(BuildContext context, ScanRecord record) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -320,6 +320,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ],
       ),
     );
+    
+    if (confirmed == true) {
+      // 用户确认删除，
+    }
   }
 
   Future<void> _copyAllRecords(ScanProvider provider) async {
@@ -448,6 +452,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
         ],
       ),
     );
+    
+    if (confirmed == true) {
+      // 已清空
+    }
   }
 }
 
@@ -457,8 +465,8 @@ class _RecordListTile extends StatelessWidget {
   final VoidCallback onDelete;
 
   const _RecordListTile({
-    required: this.record,
-    required: this.onDelete,
+    required this.record,
+    required this.onDelete,
   });
 
   @override
@@ -489,14 +497,14 @@ class _RecordListTile extends StatelessWidget {
             icon: const Icon(Icons.copy),
             tooltip: '复制',
             onPressed: () {
-            Clipboard.setData(ClipboardData(text: record.cardNumber));
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('已复制到剪贴板'),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
-          },
+              Clipboard.setData(ClipboardData(text: record.cardNumber));
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('已复制到剪贴板'),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            },
           ),
           IconButton(
             icon: const Icon(Icons.delete_outline),
