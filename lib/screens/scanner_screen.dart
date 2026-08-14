@@ -28,7 +28,8 @@ class ScannerScreen extends StatefulWidget {
   State<ScannerScreen> createState() => _ScannerScreenState();
 }
 
-class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserver {
+class _ScannerScreenState extends State<ScannerScreen>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   CameraController? _cameraController;
   TextRecognizer? _textRecognizer;
   BarcodeScanner? _qrScanner;
@@ -47,6 +48,12 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
   // 绑定模式状态
   _BindStep _bindStep = _BindStep.device;
   String? _bindingDeviceCode;
+
+  // 取景框扫描线动画，让扫描区域看起来是实时动态的
+  late final AnimationController _scanLineController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1800),
+  )..repeat(reverse: true);
 
   @override
   void initState() {
@@ -87,6 +94,7 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _scanLineController.dispose();
     _stopStream();
     _cameraController?.dispose();
     _textRecognizer?.close();
@@ -221,7 +229,8 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
           final value = barcodes.where((b) => b.rawValue != null && b.rawValue!.isNotEmpty).map((b) => b.rawValue!).firstOrNull;
           if (value == null) return;
           debugPrint('✅ 识别到设备码: $value');
-          _stopStream();
+          // 不停止图像流，识别后自动切换为扫描流量卡条形码，
+          // 无需手动点击“下一步”
           if (!mounted) return;
           setState(() {
             _bindingDeviceCode = value;
@@ -562,8 +571,26 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     _focusAtCenter();
   }
 
-  /// 绑定模式：设备已识别，继续扫描流量卡
-  void _proceedToCard() {
+  /// 绑定模式：仅重新扫描设备二维码（不影响已识别的流量卡）
+  void _rescanDeviceCode() {
+    _stopStream();
+    setState(() {
+      _bindingDeviceCode = null;
+      _extractedNumber = null;
+      _recognizedText = null;
+      _bindStep = _BindStep.device;
+    });
+    _startStreamIfNeeded();
+    _focusAtCenter();
+  }
+
+  /// 绑定模式：仅重新扫描流量卡条形码（不影响已识别的设备码）
+  void _rescanCardNumber() {
+    _stopStream();
+    setState(() {
+      _extractedNumber = null;
+      _recognizedText = null;
+    });
     _startStreamIfNeeded();
     _focusAtCenter();
   }
@@ -804,9 +831,7 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
                 fit: StackFit.expand,
                 children: [
                   CameraPreview(_cameraController!),
-                  Center(
-                    child: _buildScanOverlay(),
-                  ),
+                  _buildScanOverlay(),
                   Positioned(
                     bottom: 16,
                     left: 0,
@@ -941,7 +966,7 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     );
   }
 
-  /// 扫码取景框，随模式变化
+  /// 扫码取景框，随模式变化（四周压暗 + 动态扫描线，避免“静止图片”感）
   Widget _buildScanOverlay() {
     final double width;
     final double height;
@@ -969,13 +994,86 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
         break;
     }
 
-    return Container(
-      width: width,
-      height: height,
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.white, width: 2),
-        borderRadius: BorderRadius.circular(8),
-      ),
+    final bool showScanLine = _isStreaming && _currentMode != ScanMode.iccid;
+    final Color dimColor = Colors.black.withValues(alpha: 0.35);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxW = constraints.maxWidth;
+        final maxH = constraints.maxHeight;
+        final left = (maxW - width) / 2;
+        final top = (maxH - height) / 2;
+        final right = left + width;
+        final bottom = top + height;
+
+        return Stack(
+          children: [
+            // 取景框四周压暗，突出识别区域
+            Positioned(
+              left: 0, top: 0, right: 0, height: top,
+              child: ColoredBox(color: dimColor),
+            ),
+            Positioned(
+              left: 0, top: bottom, right: 0, height: maxH - bottom,
+              child: ColoredBox(color: dimColor),
+            ),
+            Positioned(
+              left: 0, top: top, width: left, height: height,
+              child: ColoredBox(color: dimColor),
+            ),
+            Positioned(
+              left: right, top: top, width: maxW - right, height: height,
+              child: ColoredBox(color: dimColor),
+            ),
+            // 取景框
+            Positioned(
+              left: left,
+              top: top,
+              width: width,
+              height: height,
+              child: Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.white, width: 2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            // 动态扫描线（仅在实时扫描时显示）
+            if (showScanLine)
+              Positioned(
+                left: left + 4,
+                top: top,
+                width: width - 8,
+                height: height,
+                child: ClipRect(
+                  child: AnimatedBuilder(
+                    animation: _scanLineController,
+                    builder: (context, child) {
+                      return Stack(
+                        children: [
+                          Positioned(
+                            top: (height - 8) * _scanLineController.value,
+                            left: 0,
+                            right: 0,
+                            child: Container(
+                              height: 2,
+                              decoration: const BoxDecoration(
+                                color: Colors.greenAccent,
+                                boxShadow: [
+                                  BoxShadow(color: Colors.greenAccent, blurRadius: 8),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -1045,85 +1143,79 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
       );
     }
 
-    // 第2步：等待扫描流量卡条形码
+    // 第2步：自动扫描流量卡条形码（设备码已识别，无需点击下一步）
     if (_extractedNumber == null) {
       return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           Text('设备绑定', style: theme.textTheme.titleSmall),
           const SizedBox(height: 8),
-          _buildBindValueRow('设备码', _bindingDeviceCode!),
+          _buildBindValueRow(
+            '设备码',
+            _bindingDeviceCode!,
+            onRescan: _rescanDeviceCode,
+            rescanTooltip: '重新扫描设备二维码',
+          ),
           const SizedBox(height: 12),
           _buildStepIndicator(activeStep: 2),
           const SizedBox(height: 12),
           Text(
-            '第2步/共2步：请扫描流量卡条形码',
+            '第2步/共2步：正在扫描流量卡条形码...',
             style: theme.textTheme.bodyMedium?.copyWith(color: Colors.grey.shade700),
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton.icon(
-                  onPressed: _proceedToCard,
-                  icon: const Icon(Icons.qr_code_scanner),
-                  label: const Text('下一步'),
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    backgroundColor: Colors.blue,
-                    foregroundColor: Colors.white,
-                  ),
-                ),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: null,
+              icon: const Icon(Icons.radar),
+              label: Text(_isStreaming ? '扫描中...' : '扫描已暂停'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                backgroundColor: Colors.blueGrey.shade200,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: Colors.blueGrey.shade200,
+                disabledForegroundColor: Colors.white,
               ),
-              const SizedBox(width: 12),
-              ElevatedButton.icon(
-                onPressed: _resetResult,
-                icon: const Icon(Icons.refresh),
-                label: const Text('重新扫描'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       );
     }
 
-    // 完成：确认绑定
+    // 完成：确认绑定，设备码/卡号均可单独重扫
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Text('设备绑定', style: theme.textTheme.titleSmall),
         const SizedBox(height: 8),
-        _buildBindValueRow('设备码', _bindingDeviceCode!),
+        _buildBindValueRow(
+          '设备码',
+          _bindingDeviceCode!,
+          onRescan: _rescanDeviceCode,
+          rescanTooltip: '重新扫描设备二维码',
+        ),
         const SizedBox(height: 4),
-        _buildBindValueRow('流量卡', _extractedNumber!, highlight: true),
+        _buildBindValueRow(
+          '流量卡',
+          _extractedNumber!,
+          highlight: true,
+          onRescan: _rescanCardNumber,
+          rescanTooltip: '重新扫描流量卡条形码',
+        ),
         const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: ElevatedButton.icon(
-                onPressed: _confirmBinding,
-                icon: const Icon(Icons.link),
-                label: const Text('确认绑定'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                ),
-              ),
+        SizedBox(
+          width: double.infinity,
+          child: ElevatedButton.icon(
+            onPressed: _confirmBinding,
+            icon: const Icon(Icons.link),
+            label: const Text('确认绑定'),
+            style: ElevatedButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              backgroundColor: Colors.green,
+              foregroundColor: Colors.white,
             ),
-            const SizedBox(width: 12),
-            ElevatedButton.icon(
-              onPressed: _resetResult,
-              icon: const Icon(Icons.refresh),
-              label: const Text('重新开始'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-              ),
-            ),
-          ],
+          ),
         ),
       ],
     );
@@ -1157,11 +1249,17 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
     );
   }
 
-  /// 绑定面板中的键值行
-  Widget _buildBindValueRow(String label, String value, {bool highlight = false}) {
+  /// 绑定面板中的键值行（可带单独重扫按钮）
+  Widget _buildBindValueRow(
+    String label,
+    String value, {
+    bool highlight = false,
+    VoidCallback? onRescan,
+    String? rescanTooltip,
+  }) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
         color: highlight ? Colors.green.shade50 : Colors.white,
         borderRadius: BorderRadius.circular(8),
@@ -1183,6 +1281,16 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
               ),
             ),
           ),
+          if (onRescan != null) ...[
+            const SizedBox(width: 4),
+            IconButton(
+              tooltip: rescanTooltip ?? '重新扫描',
+              icon: const Icon(Icons.refresh, size: 20),
+              color: Colors.blueGrey,
+              visualDensity: VisualDensity.compact,
+              onPressed: onRescan,
+            ),
+          ],
         ],
       ),
     );

@@ -172,7 +172,7 @@ class DatabaseService {
       final r = records[i];
       buffer.writeln([
         i + 1,
-        '="${r.cardNumber}"',  // 用 ="xxx" 格式，Excel会当作文本
+        _csvAsText(r.cardNumber), // 以文本形式导出，避免长数字被显示为科学计数法
         r.scannedAt.toString(),
         r.notes ?? '',
       ].join(','));
@@ -275,14 +275,20 @@ class DatabaseService {
       final b = bindings[i];
       buffer.writeln([
         i + 1,
-        _csvEscape(b.deviceCode),
-        _csvEscape(b.cardNumber),
+        _csvAsText(b.deviceCode), // 设备码/卡号以文本导出，避免科学计数法
+        _csvAsText(b.cardNumber),
         b.boundAt.toString(),
         _csvEscape(b.notes ?? ''),
       ].join(','));
     }
 
     return buffer.toString();
+  }
+
+  /// 以文本形式导出单元格，防止长数字（ICCID/设备码）被 Excel 解析为科学计数法。
+  /// 使用 `="值"` 公式形式让 Excel 始终当作文本处理。
+  String _csvAsText(String value) {
+    return '"=${value.replaceAll('"', '""')}"';
   }
 
   /// CSV 字段转义
