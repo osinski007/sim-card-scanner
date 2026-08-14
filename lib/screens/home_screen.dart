@@ -38,7 +38,13 @@ class _HomeScreenState extends State<HomeScreen> {
               });
             },
           ),
-          ScannerScreen(),
+          ScannerScreen(
+            onViewRecords: () {
+              setState(() {
+                _currentIndex = 2;
+              });
+            },
+          ),
           HistoryScreen(),
         ],
       ),
@@ -119,6 +125,15 @@ class _DashboardTab extends StatelessWidget {
                         color: Colors.green,
                       ),
                     ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: _StatCard(
+                        title: '已绑定',
+                        value: '${provider.bindingCount}',
+                        icon: Icons.link,
+                        color: Colors.orange,
+                      ),
+                    ),
                   ],
                 ),
                 
@@ -185,9 +200,7 @@ class _DashboardTab extends StatelessWidget {
             ),
           ),
           floatingActionButton: FloatingActionButton.extended(
-            onPressed: () {
-              // 切换到扫描标签
-            },
+            onPressed: () => onNavigate(1),
             icon: const Icon(Icons.camera_alt),
             label: const Text('扫描'),
           ),

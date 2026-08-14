@@ -16,6 +16,9 @@ dependencies:
   # 文字识别 (Google ML Kit - 支持离线)
   google_mlkit_text_recognition: ^0.11.0
   
+  # 二维码/条形码识别 (Google ML Kit)
+  google_mlkit_barcode_scanning: ^0.10.0
+  
   # 本地数据库
   sqflite: ^2.3.0
   path: ^1.8.3
