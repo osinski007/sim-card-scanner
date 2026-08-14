@@ -130,6 +130,26 @@ class ScanProvider extends ChangeNotifier {
     }
   }
 
+  /// 按设备码查询已有绑定（用于识别时重复提示）
+  Future<DeviceBinding?> findBindingByDeviceCode(String deviceCode) async {
+    try {
+      return await _db.findBindingByDeviceCode(deviceCode);
+    } catch (e) {
+      _error = '查询绑定失败: $e';
+      return null;
+    }
+  }
+
+  /// 按流量卡号查询已有绑定（用于识别时重复提示）
+  Future<DeviceBinding?> findBindingByCardNumber(String cardNumber) async {
+    try {
+      return await _db.findBindingByCardNumber(cardNumber);
+    } catch (e) {
+      _error = '查询绑定失败: $e';
+      return null;
+    }
+  }
+
   /// 导出绑定数据为 CSV
   Future<String?> exportBindingsToCsv() async {
     try {

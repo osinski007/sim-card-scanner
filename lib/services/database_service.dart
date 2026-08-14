@@ -226,6 +226,30 @@ class DatabaseService {
     return BindingResult.success;
   }
 
+  /// 按设备码查询绑定（无则返回 null）
+  Future<DeviceBinding?> findBindingByDeviceCode(String deviceCode) async {
+    final db = await database;
+    final rows = await db.query(
+      _bindingTableName,
+      where: 'device_code = ?',
+      whereArgs: [deviceCode],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : DeviceBinding.fromMap(rows.first);
+  }
+
+  /// 按流量卡号查询绑定（无则返回 null）
+  Future<DeviceBinding?> findBindingByCardNumber(String cardNumber) async {
+    final db = await database;
+    final rows = await db.query(
+      _bindingTableName,
+      where: 'card_number = ?',
+      whereArgs: [cardNumber],
+      limit: 1,
+    );
+    return rows.isEmpty ? null : DeviceBinding.fromMap(rows.first);
+  }
+
   /// 获取所有绑定（按时间倒序）
   Future<List<DeviceBinding>> getAllBindings() async {
     final db = await database;

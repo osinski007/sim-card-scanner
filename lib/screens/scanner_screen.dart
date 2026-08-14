@@ -49,6 +49,13 @@ class _ScannerScreenState extends State<ScannerScreen>
   _BindStep _bindStep = _BindStep.device;
   String? _bindingDeviceCode;
 
+  // 绑定流程中的重复提示（设备已存在 / 流量卡已存在）
+  String? _bindWarning;
+
+  // 连续帧确认状态，用于降低二维码/条形码误识别
+  String? _pendingValue;
+  int _pendingCount = 0;
+
   // 取景框扫描线动画，让扫描区域看起来是实时动态的
   late final AnimationController _scanLineController = AnimationController(
     vsync: this,
@@ -166,10 +173,12 @@ class _ScannerScreenState extends State<ScannerScreen>
   void _onModeChanged(ScanMode mode) {
     if (mode == _currentMode) return;
     _stopStream();
+    _clearPendingScan();
     setState(() {
       _currentMode = mode;
       _extractedNumber = null;
       _recognizedText = null;
+      _bindWarning = null;
       if (mode != ScanMode.bind) {
         _bindingDeviceCode = null;
         _bindStep = _BindStep.device;
@@ -226,18 +235,27 @@ class _ScannerScreenState extends State<ScannerScreen>
           if (_bindStep != _BindStep.device) return;
           final barcodes = await _qrScanner?.processImage(inputImage);
           if (barcodes == null || barcodes.isEmpty) return;
-          final value = barcodes.where((b) => b.rawValue != null && b.rawValue!.isNotEmpty).map((b) => b.rawValue!).firstOrNull;
+          final value = barcodes
+              .where((b) => b.rawValue != null && b.rawValue!.isNotEmpty)
+              .map((b) => b.rawValue!)
+              .firstOrNull;
           if (value == null) return;
+          // 连续帧确认，避免误识别
+          if (!_confirmStableValue(value)) return;
           debugPrint('✅ 识别到设备码: $value');
-          // 不停止图像流，识别后自动切换为扫描流量卡条形码，
-          // 无需手动点击“下一步”
+          // 不停止图像流，识别后自动切换为扫描流量卡条形码；
+          // 保留已识别的流量卡号（设备码重扫场景下不删除条形码结果）
+          if (!mounted) return;
+          final existing = await context.read<ScanProvider>().findBindingByDeviceCode(value);
           if (!mounted) return;
           setState(() {
             _bindingDeviceCode = value;
             _bindStep = _BindStep.card;
-            _extractedNumber = null;
-            _recognizedText = null;
+            _bindWarning = existing != null ? '当前设备已存在：已绑定流量卡 ${existing.cardNumber}' : null;
           });
+          if (existing != null) {
+            _showBindWarning('当前设备已存在：已绑定流量卡 ${existing.cardNumber}');
+          }
           HapticFeedback.mediumImpact();
           return;
         }
@@ -245,19 +263,32 @@ class _ScannerScreenState extends State<ScannerScreen>
         if (_extractedNumber != null) return;
         final barcodes = await _barcodeScanner?.processImage(inputImage);
         if (barcodes == null || barcodes.isEmpty) return;
+        String? value;
         for (final barcode in barcodes) {
-          final value = barcode.rawValue;
-          if (value == null || value.isEmpty) continue;
-          debugPrint('✅ 识别到卡号: $value');
-          _stopStream();
-          if (!mounted) return;
-          setState(() {
-            _extractedNumber = value;
-            _recognizedText = value;
-          });
-          HapticFeedback.mediumImpact();
+          final v = barcode.rawValue;
+          if (v == null || v.isEmpty) continue;
+          // 用户尚未更换码时，设备二维码可能仍被识别，跳过与设备码相同的结果
+          if (_bindingDeviceCode != null && v == _bindingDeviceCode) continue;
+          value = v;
           break;
         }
+        if (value == null) return;
+        // 连续帧确认，降低误识别
+        if (!_confirmStableValue(value)) return;
+        debugPrint('✅ 识别到卡号: $value');
+        _stopStream();
+        if (!mounted) return;
+        final existing = await context.read<ScanProvider>().findBindingByCardNumber(value);
+        if (!mounted) return;
+        setState(() {
+          _extractedNumber = value;
+          _recognizedText = value;
+          _bindWarning = existing != null ? '该流量卡已存在：已绑定设备 ${existing.deviceCode}' : null;
+        });
+        if (existing != null) {
+          _showBindWarning('该流量卡已存在：已绑定设备 ${existing.deviceCode}');
+        }
+        HapticFeedback.mediumImpact();
         return;
       }
 
@@ -268,25 +299,63 @@ class _ScannerScreenState extends State<ScannerScreen>
       final barcodes = await scanner.processImage(inputImage);
       if (barcodes.isEmpty) return;
 
+      String? value;
       for (final barcode in barcodes) {
-        final value = barcode.rawValue;
-        if (value == null || value.isEmpty) continue;
-
-        debugPrint('✅ 识别到条码: $value');
-        _stopStream();
-        if (!mounted) return;
-        setState(() {
-          _extractedNumber = value;
-          _recognizedText = value;
-        });
-        HapticFeedback.mediumImpact();
+        final v = barcode.rawValue;
+        if (v == null || v.isEmpty) continue;
+        value = v;
         break;
       }
+      if (value == null) return;
+      // 连续帧确认，降低误识别
+      if (!_confirmStableValue(value)) return;
+
+      debugPrint('✅ 识别到条码: $value');
+      _stopStream();
+      if (!mounted) return;
+      setState(() {
+        _extractedNumber = value;
+        _recognizedText = value;
+      });
+      HapticFeedback.mediumImpact();
     } catch (e) {
       // 单帧处理失败忽略，继续下一帧
     } finally {
       _isProcessing = false;
     }
+  }
+
+  /// 连续帧确认：同一值需连续识别 2 次才返回 true，降低误识别率
+  bool _confirmStableValue(String value) {
+    if (_pendingValue == value) {
+      _pendingCount++;
+    } else {
+      _pendingValue = value;
+      _pendingCount = 1;
+    }
+    if (_pendingCount >= 2) {
+      _pendingValue = null;
+      _pendingCount = 0;
+      return true;
+    }
+    return false;
+  }
+
+  void _clearPendingScan() {
+    _pendingValue = null;
+    _pendingCount = 0;
+  }
+
+  /// 弹出绑定重复提示
+  void _showBindWarning(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.orange.shade700,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   /// 将相机帧转换为 ML Kit InputImage
@@ -559,9 +628,11 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   /// 清除当前结果并继续扫描
   void _resetResult() {
+    _clearPendingScan();
     setState(() {
       _extractedNumber = null;
       _recognizedText = null;
+      _bindWarning = null;
       if (_currentMode == ScanMode.bind) {
         _bindingDeviceCode = null;
         _bindStep = _BindStep.device;
@@ -571,13 +642,14 @@ class _ScannerScreenState extends State<ScannerScreen>
     _focusAtCenter();
   }
 
-  /// 绑定模式：仅重新扫描设备二维码（不影响已识别的流量卡）
+  /// 绑定模式：仅重新扫描设备二维码。
+  /// 保留已识别的流量卡号，重扫成功后直接回到确认页，不跳回第1步丢失条形码。
   void _rescanDeviceCode() {
     _stopStream();
+    _clearPendingScan();
     setState(() {
       _bindingDeviceCode = null;
-      _extractedNumber = null;
-      _recognizedText = null;
+      _bindWarning = null;
       _bindStep = _BindStep.device;
     });
     _startStreamIfNeeded();
@@ -587,9 +659,11 @@ class _ScannerScreenState extends State<ScannerScreen>
   /// 绑定模式：仅重新扫描流量卡条形码（不影响已识别的设备码）
   void _rescanCardNumber() {
     _stopStream();
+    _clearPendingScan();
     setState(() {
       _extractedNumber = null;
       _recognizedText = null;
+      _bindWarning = null;
     });
     _startStreamIfNeeded();
     _focusAtCenter();
@@ -1116,7 +1190,13 @@ class _ScannerScreenState extends State<ScannerScreen>
         mainAxisSize: MainAxisSize.min,
         children: [
           Text('设备绑定', style: theme.textTheme.titleSmall),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
+          _buildBindWarning(),
+          // 重扫设备时保留已识别的流量卡，不丢失条形码结果
+          if (_extractedNumber != null) ...[
+            _buildBindValueRow('流量卡(保留)', _extractedNumber!, highlight: true),
+            const SizedBox(height: 8),
+          ],
           _buildStepIndicator(activeStep: 1),
           const SizedBox(height: 12),
           Text(
@@ -1150,6 +1230,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         children: [
           Text('设备绑定', style: theme.textTheme.titleSmall),
           const SizedBox(height: 8),
+          _buildBindWarning(),
           _buildBindValueRow(
             '设备码',
             _bindingDeviceCode!,
@@ -1189,6 +1270,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       children: [
         Text('设备绑定', style: theme.textTheme.titleSmall),
         const SizedBox(height: 8),
+        _buildBindWarning(),
         _buildBindValueRow(
           '设备码',
           _bindingDeviceCode!,
@@ -1221,9 +1303,35 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
+  /// 绑定重复提示横幅（设备已存在 / 流量卡已存在）
+  Widget _buildBindWarning() {
+    final warning = _bindWarning;
+    if (warning == null) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 18, color: Colors.orange.shade700),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              warning,
+              style: TextStyle(color: Colors.orange.shade900, fontSize: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// 绑定步骤指示器
-  Widget _buildStepIndicator({required int activeStep}) {
-    return Row(
+  Widget _buildStepIndicator({required int activeStep}) {    return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         _buildStepDot(1, activeStep >= 1),
