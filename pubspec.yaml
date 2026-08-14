@@ -20,7 +20,7 @@ dependencies:
   google_mlkit_barcode_scanning: ^0.10.0
   
   # 本地数据库
-  sqflite: ^2.3.0
+  sqflite: '>=2.3.0 <2.4.0'
   path: ^1.8.3
   
   # 权限管理
