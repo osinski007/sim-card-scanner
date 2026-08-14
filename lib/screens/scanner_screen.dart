@@ -904,7 +904,12 @@ class _ScannerScreenState extends State<ScannerScreen>
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  CameraPreview(_cameraController!),
+                  // 保持相机原始宽高比，避免预览被拉伸/压缩变形
+                  FittedBox(
+                    fit: BoxFit.cover,
+                    clipBehavior: Clip.hardEdge,
+                    child: CameraPreview(_cameraController!),
+                  ),
                   _buildScanOverlay(),
                   Positioned(
                     bottom: 16,
