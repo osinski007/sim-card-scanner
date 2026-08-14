@@ -912,12 +912,7 @@ class _ScannerScreenState extends State<ScannerScreen>
               child: Stack(
                 fit: StackFit.expand,
                 children: [
-                  // 保持相机原始宽高比，避免预览被拉伸/压缩变形
-                  FittedBox(
-                    fit: BoxFit.cover,
-                    clipBehavior: Clip.hardEdge,
-                    child: CameraPreview(_cameraController!),
-                  ),
+                  _buildCameraPreview(),
                   _buildScanOverlay(),
                   Positioned(
                     bottom: 16,
@@ -1054,6 +1049,24 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   /// 扫码取景框，随模式变化（四周压暗 + 动态扫描线，避免“静止图片”感）
+  /// 相机预览：按镜头真实宽高比居中显示。
+  ///
+  /// 采用官方示例的标准写法（Center + AspectRatio），纯布局、无缩放变换，
+  /// 避免部分 Android 设备上相机纹理（Texture）在 FittedBox/Transform
+  /// 缩放时无法渲染、预览画面变成灰白色的问题。
+  Widget _buildCameraPreview() {
+    final cam = _cameraController;
+    if (cam == null || !cam.value.isInitialized) {
+      return const SizedBox.shrink();
+    }
+    return Center(
+      child: AspectRatio(
+        aspectRatio: cam.value.aspectRatio,
+        child: CameraPreview(cam),
+      ),
+    );
+  }
+
   Widget _buildScanOverlay() {
     final double width;
     final double height;
