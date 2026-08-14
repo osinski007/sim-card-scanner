@@ -127,10 +127,10 @@ class _ScannerScreenState extends State<ScannerScreen>
     setState(() => _hasPermission = true);
 
     try {
-      // 提前创建识别器，与摄像头初始化并行加载 ML Kit 模型
-      _textRecognizer = TextRecognizer();
-      _qrScanner = BarcodeScanner(formats: [BarcodeFormat.qrCode]);
-      _barcodeScanner = BarcodeScanner(formats: [BarcodeFormat.all]);
+      // ML Kit 识别器按需创建一次（构造函数很轻量，模型在首次识别时才加载）
+      _textRecognizer ??= TextRecognizer();
+      _qrScanner ??= BarcodeScanner(formats: [BarcodeFormat.qrCode]);
+      _barcodeScanner ??= BarcodeScanner(formats: [BarcodeFormat.all]);
 
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
@@ -149,24 +149,32 @@ class _ScannerScreenState extends State<ScannerScreen>
         enableAudio: false,
       );
 
+      // 建立 camera2 预览会话（首次打开较慢，属相机系统固有开销）
       await _cameraController!.initialize();
 
-      // 焦点/曝光设置不阻塞初始化。
-      // FocusMode.auto 在 Android 上对应 CONTROL_AF_MODE_CONTINUOUS_PICTURE，
-      // 即持续自动对焦，对近距离/屏幕上的二维码、条形码识别至关重要，
-      // 避免长时间对不上焦导致一直识别失败。
-      try {
-        _cameraController!.setFocusMode(FocusMode.auto);
-        _cameraController!.setExposureMode(ExposureMode.auto);
-        await _focusAtCenter();
-      } catch (_) {}
-
+      // 立即标记初始化完成并显示画面，
+      // 焦点/曝光设置异步执行，不再阻塞“正在初始化”的等待时间
       setState(() => _isInitialized = true);
       _startStreamIfNeeded();
+      _applyFocusSettings();
     } catch (e) {
       debugPrint('初始化摄像头失败: $e');
       setState(() => _errorMsg = '初始化摄像头失败: $e');
     }
+  }
+
+  /// 应用焦点/曝光设置（异步执行，不阻塞相机初始化）
+  Future<void> _applyFocusSettings() async {
+    final cam = _cameraController;
+    if (cam == null || !cam.value.isInitialized) return;
+    try {
+      // FocusMode.auto 在 Android 上对应 CONTROL_AF_MODE_CONTINUOUS_PICTURE，
+      // 即持续自动对焦，对近距离/屏幕上的二维码、条形码识别至关重要，
+      // 避免长时间对不上焦导致一直识别失败。
+      cam.setFocusMode(FocusMode.auto);
+      cam.setExposureMode(ExposureMode.auto);
+      await _focusAtCenter();
+    } catch (_) {}
   }
 
   /// 切换扫描模式
