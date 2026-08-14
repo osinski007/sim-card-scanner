@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -225,6 +226,9 @@ class _ScannerScreenState extends State<ScannerScreen>
     } catch (e) {
       debugPrint('启动图像流失败: $e');
     }
+
+    // 启动图像流后重新触发一次中心对焦，让镜头尽快对准画面中心区域
+    _focusAtCenter();
   }
 
   /// 处理实时帧，识别二维码/条形码
@@ -519,9 +523,10 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     try {
       try {
+        // setFocusMode(locked) 会触发一次对焦扫描，等待足够时间让镜头稳定
         await _cameraController!.setFocusMode(FocusMode.locked);
         await _cameraController!.setExposureMode(ExposureMode.locked);
-        await Future.delayed(const Duration(milliseconds: 100));
+        await Future.delayed(const Duration(milliseconds: 400));
       } catch (_) {}
 
       final image = await _cameraController!.takePicture();
@@ -1048,22 +1053,54 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
-  /// 扫码取景框，随模式变化（四周压暗 + 动态扫描线，避免“静止图片”感）
-  /// 相机预览：按镜头真实宽高比居中显示。
+  /// 相机预览：按镜头真实宽高比以 cover 方式铺满预览区域，且不做缩放变换。
   ///
-  /// 采用官方示例的标准写法（Center + AspectRatio），纯布局、无缩放变换，
-  /// 避免部分 Android 设备上相机纹理（Texture）在 FittedBox/Transform
-  /// 缩放时无法渲染、预览画面变成灰白色的问题。
+  /// CameraPreview 内部按当前屏幕方向计算渲染宽高比（竖屏下为 1/aspectRatio），
+  /// 这里用相同公式算出能铺满区域的尺寸，再通过纯布局 + 裁剪呈现：
+  /// - 不拉伸变形（之前外层误用 AspectRatio(aspectRatio) 把画面压扁了）；
+  /// - 不使用 FittedBox/Transform 缩放（部分 Android 设备上相机纹理在变换
+  ///   缩放下无法渲染，预览变成灰白色）。
   Widget _buildCameraPreview() {
     final cam = _cameraController;
     if (cam == null || !cam.value.isInitialized) {
       return const SizedBox.shrink();
     }
-    return Center(
-      child: AspectRatio(
-        aspectRatio: cam.value.aspectRatio,
-        child: CameraPreview(cam),
-      ),
+
+    final DeviceOrientation orientation = cam.value.previewPauseOrientation ??
+        cam.value.lockedCaptureOrientation ??
+        cam.value.deviceOrientation;
+    final bool landscape = orientation == DeviceOrientation.landscapeLeft ||
+        orientation == DeviceOrientation.landscapeRight;
+    // 与 CameraPreview 内部一致的渲染宽高比（宽/高）
+    final double renderAspect =
+        landscape ? cam.value.aspectRatio : 1 / cam.value.aspectRatio;
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final double maxW = constraints.maxWidth;
+        final double maxH = constraints.maxHeight;
+
+        double w;
+        double h;
+        if (maxW / maxH < renderAspect) {
+          // 预览区域比画面更“瘦高”：以高度铺满，两侧溢出后裁剪
+          h = maxH;
+          w = h * renderAspect;
+        } else {
+          w = maxW;
+          h = w / renderAspect;
+        }
+
+        return ClipRect(
+          child: Center(
+            child: SizedBox(
+              width: w,
+              height: h,
+              child: CameraPreview(cam),
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -1072,24 +1109,24 @@ class _ScannerScreenState extends State<ScannerScreen>
     final double height;
     switch (_currentMode) {
       case ScanMode.iccid:
-        width = 300;
-        height = 80;
+        width = 360;
+        height = 130;
         break;
       case ScanMode.qr:
-        width = 240;
-        height = 240;
+        width = 300;
+        height = 300;
         break;
       case ScanMode.barcode:
-        width = 320;
-        height = 120;
+        width = 400;
+        height = 170;
         break;
       case ScanMode.bind:
         if (_bindStep == _BindStep.device) {
-          width = 240;
-          height = 240;
+          width = 300;
+          height = 300;
         } else {
-          width = 320;
-          height = 120;
+          width = 400;
+          height = 170;
         }
         break;
     }
@@ -1181,7 +1218,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   String _getScanHint() {
     switch (_currentMode) {
       case ScanMode.iccid:
-        return '将ICCID对准框内，点击拍照按钮';
+        return '将ICCID对准框内，保持约10~20cm距离，点击拍照';
       case ScanMode.qr:
         return '将二维码对准框内，自动识别';
       case ScanMode.barcode:
