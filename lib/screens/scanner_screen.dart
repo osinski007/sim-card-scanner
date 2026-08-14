@@ -130,16 +130,20 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
 
       _cameraController = CameraController(
         backCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.high,
         enableAudio: false,
       );
 
       await _cameraController!.initialize();
 
-      // 焦点/曝光设置不阻塞初始化
+      // 焦点/曝光设置不阻塞初始化。
+      // FocusMode.auto 在 Android 上对应 CONTROL_AF_MODE_CONTINUOUS_PICTURE，
+      // 即持续自动对焦，对近距离/屏幕上的二维码、条形码识别至关重要，
+      // 避免长时间对不上焦导致一直识别失败。
       try {
         _cameraController!.setFocusMode(FocusMode.auto);
         _cameraController!.setExposureMode(ExposureMode.auto);
+        await _focusAtCenter();
       } catch (_) {}
 
       setState(() => _isInitialized = true);
@@ -164,6 +168,7 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
       }
     });
     _startStreamIfNeeded();
+    _focusAtCenter();
   }
 
   void _stopStream() {
@@ -276,6 +281,10 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
   }
 
   /// 将相机帧转换为 ML Kit InputImage
+  ///
+  /// 注意：Android 端 google_mlkit_commons 的原生实现会忽略 bytes_per_row
+  /// 并按标准 NV21 布局解析字节数组，因此这里必须生成无行填充、UV 交错的
+  /// 标准 NV21 数据，否则部分设备上（Y 平面存在行对齐填充时）识别率会很低。
   InputImage? _inputImageFromCameraImage(CameraImage image) {
     final camera = _cameraController?.description;
     if (camera == null) return null;
@@ -295,18 +304,31 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
         imageRotation = InputImageRotation.rotation0deg;
     }
 
-    final bytes = _concatenatePlanes(image.planes);
     final size = Size(image.width.toDouble(), image.height.toDouble());
-    final format = Platform.isAndroid
-        ? InputImageFormat.nv21
-        : InputImageFormat.bgra8888;
 
+    if (Platform.isAndroid) {
+      final nv21 = _convertToNv21(image);
+      if (nv21 == null) return null;
+      return InputImage.fromBytes(
+        bytes: nv21,
+        metadata: InputImageMetadata(
+          size: size,
+          rotation: imageRotation,
+          format: InputImageFormat.nv21,
+          // 已去除行填充，每行字节数等于图像宽度
+          bytesPerRow: image.width,
+        ),
+      );
+    }
+
+    // iOS: BGRA8888 直接拼接各平面
+    final bgra = _concatenatePlanes(image.planes);
     return InputImage.fromBytes(
-      bytes: bytes,
+      bytes: bgra,
       metadata: InputImageMetadata(
         size: size,
         rotation: imageRotation,
-        format: format,
+        format: InputImageFormat.bgra8888,
         bytesPerRow: image.planes.first.bytesPerRow,
       ),
     );
@@ -318,6 +340,84 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
       allBytes.putUint8List(plane.bytes);
     }
     return allBytes.done().buffer.asUint8List();
+  }
+
+  /// 将 CameraImage 转换为无行填充的标准 NV21 字节流（Y 平面 + VU 交错）。
+  ///
+  /// 处理两种常见布局：
+  /// - Y 平面存在行填充（bytesPerRow > width）时逐行去除填充；
+  /// - UV 为分离平面（pixelStride=1）时按 NV21 顺序交错 V、U；
+  /// - UV 已交错（pixelStride=2）时直接拷贝。
+  Uint8List? _convertToNv21(CameraImage image) {
+    try {
+      final width = image.width;
+      final height = image.height;
+      if (width <= 0 || height <= 0 || image.planes.length < 3) return null;
+
+      final yPlane = image.planes[0];
+      final yRowStride = yPlane.bytesPerRow;
+      final out = Uint8List(width * height * 3 ~/ 2);
+      var outPos = 0;
+
+      // 拷贝 Y 平面，处理行填充
+      if (yRowStride == width) {
+        out.setRange(0, width * height, yPlane.bytes, 0);
+        outPos = width * height;
+      } else {
+        for (var row = 0; row < height; row++) {
+          final start = row * yRowStride;
+          if (start + width > yPlane.bytes.length) break;
+          out.setRange(outPos, outPos + width, yPlane.bytes, start);
+          outPos += width;
+        }
+      }
+
+      final uPlane = image.planes[1];
+      final vPlane = image.planes[2];
+      final uRowStride = uPlane.bytesPerRow;
+      final vRowStride = vPlane.bytesPerRow;
+      final uPixelStride = uPlane.bytesPerPixel;
+      final vPixelStride = vPlane.bytesPerPixel;
+      final uvWidth = width ~/ 2;
+      final uvHeight = height ~/ 2;
+      final uvBytes = uvWidth * uvHeight * 2;
+
+      // 若 UV 已是 NV21 交错布局（pixelStride=2），直接拷贝
+      if (uPixelStride == 2 && vPixelStride == 2 && outPos + uvBytes <= out.length) {
+        final uvData = uPlane.bytes.length >= uvBytes ? uPlane.bytes : vPlane.bytes;
+        if (uvData.length >= uvBytes) {
+          out.setRange(outPos, outPos + uvBytes, uvData, 0);
+          return out;
+        }
+      }
+
+      // 分离平面：逐像素交错 V、U
+      for (var row = 0; row < uvHeight; row++) {
+        for (var col = 0; col < uvWidth; col++) {
+          final uIndex = row * uRowStride + col * (uPixelStride ?? 1);
+          final vIndex = row * vRowStride + col * (vPixelStride ?? 1);
+          if (uIndex >= uPlane.bytes.length || vIndex >= vPlane.bytes.length) {
+            continue;
+          }
+          out[outPos++] = vPlane.bytes[vIndex];
+          out[outPos++] = uPlane.bytes[uIndex];
+        }
+      }
+      return out;
+    } catch (e) {
+      debugPrint('NV21 转换失败: $e');
+      return null;
+    }
+  }
+
+  /// 将对焦/测光点置于画面中央并触发一次对焦
+  Future<void> _focusAtCenter() async {
+    final cam = _cameraController;
+    if (cam == null || !cam.value.isInitialized) return;
+    try {
+      await cam.setFocusPoint(const Offset(0.5, 0.5));
+      await cam.setExposurePoint(const Offset(0.5, 0.5));
+    } catch (_) {}
   }
 
   /// ICCID 模式：拍照并识别
@@ -459,11 +559,13 @@ class _ScannerScreenState extends State<ScannerScreen> with WidgetsBindingObserv
       }
     });
     _startStreamIfNeeded();
+    _focusAtCenter();
   }
 
   /// 绑定模式：设备已识别，继续扫描流量卡
   void _proceedToCard() {
     _startStreamIfNeeded();
+    _focusAtCenter();
   }
 
   /// 绑定模式：确认绑定设备与流量卡
