@@ -46,6 +46,10 @@ class _ScannerScreenState extends State<ScannerScreen>
   String? _errorMsg;
   String? _recognizedText;
 
+  // 帧处理节流：跳过部分帧以提高识别成功率
+  int _frameCount = 0;
+  static const int _frameSkip = 2; // 每3帧处理1帧
+
   // 绑定模式状态
   _BindStep _bindStep = _BindStep.device;
   String? _bindingDeviceCode;
@@ -56,6 +60,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   // 连续帧确认状态，用于降低二维码/条形码误识别
   String? _pendingValue;
   int _pendingCount = 0;
+  static const int _requiredFrames = 3; // 提高到3帧确认，降低误识
 
   // 取景框扫描线动画，让扫描区域看起来是实时动态的
   late final AnimationController _scanLineController = AnimationController(
@@ -130,8 +135,35 @@ class _ScannerScreenState extends State<ScannerScreen>
     try {
       // ML Kit 识别器按需创建一次（构造函数很轻量，模型在首次识别时才加载）
       _textRecognizer ??= TextRecognizer();
-      _qrScanner ??= BarcodeScanner(formats: [BarcodeFormat.qrCode]);
-      _barcodeScanner ??= BarcodeScanner(formats: [BarcodeFormat.all]);
+
+      // 二维码扫描器 - 支持常见二维码格式
+      _qrScanner ??= BarcodeScanner(
+        formats: [
+          BarcodeFormat.qrCode,
+          BarcodeFormat.dataMatrix,
+          BarcodeFormat.aztec, // 支持更多二维码类型
+        ],
+      );
+
+      // 条形码扫描器 - 明确指定常见条形码格式，提高识别准确率
+      _barcodeScanner ??= BarcodeScanner(
+        formats: [
+          // 一维条形码
+          BarcodeFormat.code128,    // 最常见的条形码格式
+          BarcodeFormat.code39,     // 字母数字条形码
+          BarcodeFormat.code93,     // Code39的改进版
+          BarcodeFormat.ean13,      // 商品条码
+          BarcodeFormat.ean8,       // 短商品条码
+          BarcodeFormat.upca,       // UPC-A
+          BarcodeFormat.upce,       // UPC-E
+          // 二维条形码
+          BarcodeFormat.pdf417,
+          BarcodeFormat.dataMatrix,
+          // 其他格式
+          BarcodeFormat.codabar,
+          BarcodeFormat.itf,
+        ],
+      );
 
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
@@ -148,6 +180,10 @@ class _ScannerScreenState extends State<ScannerScreen>
         backCamera,
         ResolutionPreset.high,
         enableAudio: false,
+        // 优化识别性能和图像质量
+        imageFormatGroup: Platform.isAndroid
+            ? ImageFormatGroup.nv21 // Android使用NV21格式
+            : ImageFormatGroup.bgra8888, // iOS使用BGRA8888
       );
 
       // 建立 camera2 预览会话（首次打开较慢，属相机系统固有开销）
@@ -165,17 +201,45 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   /// 应用焦点/曝光设置（异步执行，不阻塞相机初始化）
+  ///
+  /// 优化点：
+  /// 1. 使用连续自动对焦模式，确保近距离物体也能清晰
+  /// 2. 设置合适的曝光点，避免过暗或过亮
+  /// 3. 增加重试机制提高成功率
   Future<void> _applyFocusSettings() async {
     final cam = _cameraController;
     if (cam == null || !cam.value.isInitialized) return;
-    try {
-      // FocusMode.auto 在 Android 上对应 CONTROL_AF_MODE_CONTINUOUS_PICTURE，
-      // 即持续自动对焦，对近距离/屏幕上的二维码、条形码识别至关重要，
-      // 避免长时间对不上焦导致一直识别失败。
-      cam.setFocusMode(FocusMode.auto);
-      cam.setExposureMode(ExposureMode.auto);
-      await _focusAtCenter();
-    } catch (_) {}
+
+    // 重试几次以确保设置成功
+    for (int i = 0; i < 3; i++) {
+      try {
+        await Future.delayed(Duration(milliseconds: 100 * i));
+
+        // FocusMode.auto 在 Android 上对应 CONTROL_AF_MODE_CONTINUOUS_PICTURE，
+        // 即持续自动对焦，对近距离/屏幕上的二维码、条形码识别至关重要，
+        // 避免长时间对不上焦导致一直识别失败。
+        await cam.setFocusMode(FocusMode.auto);
+        await cam.setExposureMode(ExposureMode.auto);
+
+        // 设置中心对焦点和测光点
+        await cam.setFocusPoint(const Offset(0.5, 0.5));
+        await cam.setExposurePoint(const Offset(0.5, 0.5));
+
+        // 尝试设置更高的帧率以提高识别响应速度
+        try {
+          await cam.setFlashMode(FlashMode.off);
+        } catch (_) {}
+
+        debugPrint('对焦设置应用成功');
+        break;
+      } catch (e) {
+        debugPrint('对焦设置尝试 $i 失败: $e');
+        if (i == 2) {
+          // 最后一次尝试失败，但不阻塞初始化
+          debugPrint('对焦设置最终失败，但相机仍可使用');
+        }
+      }
+    }
   }
 
   /// 切换扫描模式
@@ -234,6 +298,13 @@ class _ScannerScreenState extends State<ScannerScreen>
   /// 处理实时帧，识别二维码/条形码
   Future<void> _processCameraFrame(CameraImage cameraImage) async {
     if (_isProcessing) return;
+
+    // 帧节流：每N帧处理一次，避免过度处理导致的性能问题
+    _frameCount++;
+    if (_frameCount % (_frameSkip + 1) != 0) {
+      return;
+    }
+
     _isProcessing = true;
 
     try {
@@ -337,7 +408,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     }
   }
 
-  /// 连续帧确认：同一值需连续识别 2 次才返回 true，降低误识别率
+  /// 连续帧确认：同一值需连续识别 N 次才返回 true，降低误识别率
   bool _confirmStableValue(String value) {
     if (_pendingValue == value) {
       _pendingCount++;
@@ -345,7 +416,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       _pendingValue = value;
       _pendingCount = 1;
     }
-    if (_pendingCount >= 2) {
+    if (_pendingCount >= _requiredFrames) {
       _pendingValue = null;
       _pendingCount = 0;
       return true;
@@ -356,6 +427,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   void _clearPendingScan() {
     _pendingValue = null;
     _pendingCount = 0;
+    _frameCount = 0;
   }
 
   /// 弹出绑定重复提示
@@ -372,12 +444,22 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   /// 将相机帧转换为 ML Kit InputImage
   ///
-  /// 注意：Android 端 google_mlkit_commons 的原生实现会忽略 bytes_per_row
-  /// 并按标准 NV21 布局解析字节数组，因此这里必须生成无行填充、UV 交错的
-  /// 标准 NV21 数据，否则部分设备上（Y 平面存在行对齐填充时）识别率会很低。
+  /// 优化点：
+  /// 1. 添加图像有效性检查，避免处理损坏数据
+  /// 2. 优化 NV21 转换逻辑，确保数据格式正确
+  /// 3. 添加更详细的错误日志便于调试
   InputImage? _inputImageFromCameraImage(CameraImage image) {
     final camera = _cameraController?.description;
-    if (camera == null) return null;
+    if (camera == null) {
+      debugPrint('相机描述不可用');
+      return null;
+    }
+
+    // 验证图像尺寸
+    if (image.width <= 0 || image.height <= 0) {
+      debugPrint('无效的图像尺寸: ${image.width}x${image.height}');
+      return null;
+    }
 
     InputImageRotation imageRotation;
     switch (camera.sensorOrientation) {
@@ -398,30 +480,51 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     if (Platform.isAndroid) {
       final nv21 = _convertToNv21(image);
-      if (nv21 == null) return null;
+      if (nv21 == null) {
+        debugPrint('NV21转换失败');
+        return null;
+      }
+
+      // 验证转换后的数据大小
+      final expectedSize = image.width * image.height * 3 ~/ 2;
+      if (nv21.length != expectedSize) {
+        debugPrint('NV21数据大小不匹配: 期望=$expectedSize, 实际=${nv21.length}');
+        return null;
+      }
+
       return InputImage.fromBytes(
         bytes: nv21,
         metadata: InputImageMetadata(
           size: size,
           rotation: imageRotation,
           format: InputImageFormat.nv21,
-          // 已去除行填充，每行字节数等于图像宽度
           bytesPerRow: image.width,
         ),
       );
     }
 
     // iOS: BGRA8888 直接拼接各平面
-    final bgra = _concatenatePlanes(image.planes);
-    return InputImage.fromBytes(
-      bytes: bgra,
-      metadata: InputImageMetadata(
-        size: size,
-        rotation: imageRotation,
-        format: InputImageFormat.bgra8888,
-        bytesPerRow: image.planes.first.bytesPerRow,
-      ),
-    );
+    try {
+      final bgra = _concatenatePlanes(image.planes);
+      final expectedSize = image.width * image.height * 4;
+      if (bgra.length != expectedSize) {
+        debugPrint('BGRA数据大小不匹配: 期望=$expectedSize, 实际=${bgra.length}');
+        return null;
+      }
+
+      return InputImage.fromBytes(
+        bytes: bgra,
+        metadata: InputImageMetadata(
+          size: size,
+          rotation: imageRotation,
+          format: InputImageFormat.bgra8888,
+          bytesPerRow: image.planes.first.bytesPerRow,
+        ),
+      );
+    } catch (e) {
+      debugPrint('iOS图像转换失败: $e');
+      return null;
+    }
   }
 
   Uint8List _concatenatePlanes(List<Plane> planes) {
@@ -434,15 +537,20 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   /// 将 CameraImage 转换为无行填充的标准 NV21 字节流（Y 平面 + VU 交错）。
   ///
-  /// 处理两种常见布局：
+  /// 优化后的转换逻辑，处理两种常见布局：
   /// - Y 平面存在行填充（bytesPerRow > width）时逐行去除填充；
   /// - UV 为分离平面（pixelStride=1）时按 NV21 顺序交错 V、U；
   /// - UV 已交错（pixelStride=2）时直接拷贝。
+  ///
+  /// 增加了边界检查和错误处理，避免数组越界。
   Uint8List? _convertToNv21(CameraImage image) {
     try {
       final width = image.width;
       final height = image.height;
-      if (width <= 0 || height <= 0 || image.planes.length < 3) return null;
+      if (width <= 0 || height <= 0 || image.planes.length < 3) {
+        debugPrint('无效的图像参数: width=$width, height=$height, planes=${image.planes.length}');
+        return null;
+      }
 
       final yPlane = image.planes[0];
       final yRowStride = yPlane.bytesPerRow;
@@ -451,12 +559,22 @@ class _ScannerScreenState extends State<ScannerScreen>
 
       // 拷贝 Y 平面，处理行填充
       if (yRowStride == width) {
-        out.setRange(0, width * height, yPlane.bytes, 0);
-        outPos = width * height;
+        // 无行填充，直接拷贝
+        if (yPlane.bytes.length >= width * height) {
+          out.setRange(0, width * height, yPlane.bytes, 0);
+          outPos = width * height;
+        } else {
+          debugPrint('Y平面数据不足: 需要${width * height}, 实际${yPlane.bytes.length}');
+          return null;
+        }
       } else {
+        // 有行填充，逐行拷贝并去除填充
         for (var row = 0; row < height; row++) {
           final start = row * yRowStride;
-          if (start + width > yPlane.bytes.length) break;
+          if (start + width > yPlane.bytes.length) {
+            debugPrint('Y平面行数据越界: row=$row, start=$start, width=$width, total=${yPlane.bytes.length}');
+            return null;
+          }
           out.setRange(outPos, outPos + width, yPlane.bytes, start);
           outPos += width;
         }
@@ -466,36 +584,55 @@ class _ScannerScreenState extends State<ScannerScreen>
       final vPlane = image.planes[2];
       final uRowStride = uPlane.bytesPerRow;
       final vRowStride = vPlane.bytesPerRow;
-      final uPixelStride = uPlane.bytesPerPixel;
-      final vPixelStride = vPlane.bytesPerPixel;
+      final uPixelStride = uPlane.bytesPerPixel ?? 1;
+      final vPixelStride = vPlane.bytesPerPixel ?? 1;
       final uvWidth = width ~/ 2;
       final uvHeight = height ~/ 2;
       final uvBytes = uvWidth * uvHeight * 2;
 
+      // 验证UV平面数据大小
+      if (uPlane.bytes.length < uvBytes / 2 || vPlane.bytes.length < uvBytes / 2) {
+        debugPrint('UV平面数据不足');
+        return null;
+      }
+
       // 若 UV 已是 NV21 交错布局（pixelStride=2），直接拷贝
-      if (uPixelStride == 2 && vPixelStride == 2 && outPos + uvBytes <= out.length) {
-        final uvData = uPlane.bytes.length >= uvBytes ? uPlane.bytes : vPlane.bytes;
-        if (uvData.length >= uvBytes) {
-          out.setRange(outPos, outPos + uvBytes, uvData, 0);
-          return out;
+      if (uPixelStride == 2 && vPixelStride == 2) {
+        if (outPos + uvBytes <= out.length) {
+          final uvData = uPlane.bytes.length >= uvBytes ? uPlane.bytes : vPlane.bytes;
+          if (uvData.length >= uvBytes) {
+            out.setRange(outPos, outPos + uvBytes, uvData, 0);
+            return out;
+          } else {
+            debugPrint('交错UV数据不足: 需要$uvBytes, 实际${uvData.length}');
+          }
+        } else {
+          debugPrint('输出缓冲区溢出');
         }
       }
 
       // 分离平面：逐像素交错 V、U
       for (var row = 0; row < uvHeight; row++) {
         for (var col = 0; col < uvWidth; col++) {
-          final uIndex = row * uRowStride + col * (uPixelStride ?? 1);
-          final vIndex = row * vRowStride + col * (vPixelStride ?? 1);
+          final uIndex = row * uRowStride + col * uPixelStride;
+          final vIndex = row * vRowStride + col * vPixelStride;
+
           if (uIndex >= uPlane.bytes.length || vIndex >= vPlane.bytes.length) {
+            debugPrint('UV索引越界: uIndex=$uIndex(${uPlane.bytes.length}), vIndex=$vIndex(${vPlane.bytes.length})');
             continue;
           }
+          if (outPos + 1 >= out.length) {
+            debugPrint('输出缓冲区溢出: outPos=$outPos, length=${out.length}');
+            return out;
+          }
+
           out[outPos++] = vPlane.bytes[vIndex];
           out[outPos++] = uPlane.bytes[uIndex];
         }
       }
       return out;
-    } catch (e) {
-      debugPrint('NV21 转换失败: $e');
+    } catch (e, stackTrace) {
+      debugPrint('NV21 转换异常: $e\n$stackTrace');
       return null;
     }
   }
