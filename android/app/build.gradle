@@ -24,6 +24,14 @@ android {
         targetSdkVersion 35
         versionCode 1
         versionName "1.0"
+
+        // 性能优化配置
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a' // 只打包主流架构，减小 APK 体积
+        }
+
+        // 启用多 dex 文件优化
+        multiDexEnabled true
     }
 
     buildTypes {
@@ -31,7 +39,16 @@ android {
             signingConfig signingConfigs.debug
             shrinkResources false
             minifyEnabled false
+
+            // 性能优化
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
+    }
+
+    // 编译优化
+    dexOptions {
+        preDexLibraries = true
+        maxProcessCount 8
     }
 }
 

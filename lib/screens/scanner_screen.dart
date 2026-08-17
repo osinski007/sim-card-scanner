@@ -59,6 +59,13 @@ class _ScannerScreenState extends State<ScannerScreen>
   String? _pendingValue;
   int _pendingCount = 0;
 
+  // 缩放和对焦控制
+  double _zoomScale = 0.0;
+  double _minZoomScale = 0.0;
+  double _maxZoomScale = 0.0;
+  bool _isAutoZooming = false;
+  Offset? _focusPoint;
+
   // 取景框扫描线动画
   late final AnimationController _scanLineController = AnimationController(
     vsync: this,
@@ -72,6 +79,10 @@ class _ScannerScreenState extends State<ScannerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    // 预热：在后台初始化文本识别器，不阻塞 UI
+    _initTextRecognizer();
+
     _initCamera();
   }
 
@@ -118,12 +129,16 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   Future<void> _initCamera() async {
-    var status = await Permission.camera.status;
-    if (!status.isGranted) {
-      status = await Permission.camera.request();
-    }
+    final startTime = DateTime.now();
+    debugPrint('🚀 开始初始化相机');
 
-    if (!status.isGranted) {
+    // 并行执行权限检查和文本识别器初始化
+    final results = await Future.wait([
+      _checkCameraPermission(),
+      _initTextRecognizer(),
+    ]);
+
+    if (!results[0]) {
       setState(() {
         _hasPermission = false;
         _errorMsg = '需要相机权限才能扫描';
@@ -134,24 +149,52 @@ class _ScannerScreenState extends State<ScannerScreen>
     setState(() => _hasPermission = true);
 
     try {
-      // ML Kit 文本识别器（仅用于 ICCID 模式）
-      _textRecognizer ??= TextRecognizer();
-
       if (_currentMode == ScanMode.iccid) {
         await _initTraditionalCamera();
       } else {
         await _initScanner();
       }
 
+      final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+      debugPrint('✅ 相机初始化完成: ${elapsed}ms');
+
       setState(() => _isInitialized = true);
     } catch (e) {
-      debugPrint('初始化摄像头失败: $e');
+      final elapsed = DateTime.now().difference(startTime).inMilliseconds;
+      debugPrint('❌ 初始化摄像头失败 (${elapsed}ms): $e');
       setState(() => _errorMsg = '初始化摄像头失败: $e');
+    }
+  }
+
+  /// 检查相机权限（优化版本）
+  Future<bool> _checkCameraPermission() async {
+    final permStart = DateTime.now();
+    var status = await Permission.camera.status;
+    if (!status.isGranted) {
+      status = await Permission.camera.request();
+    }
+    debugPrint('📋 权限检查: ${DateTime.now().difference(permStart).inMilliseconds}ms');
+    return status.isGranted;
+  }
+
+  /// 异步初始化文本识别器（避免阻塞）
+  Future<void> _initTextRecognizer() async {
+    if (_textRecognizer != null) return; // 已初始化
+
+    final mlStart = DateTime.now();
+    try {
+      _textRecognizer = TextRecognizer();
+      // 预热 ML Kit（可选：处理空白图片让模型提前加载）
+      debugPrint('🤖 ML Kit 初始化: ${DateTime.now().difference(mlStart).inMilliseconds}ms');
+    } catch (e) {
+      debugPrint('⚠️ ML Kit 初始化失败: $e');
     }
   }
 
   /// 初始化传统相机（用于 ICCID 文字识别）
   Future<void> _initTraditionalCamera() async {
+    final camStart = DateTime.now();
+
     final cameras = await availableCameras();
     if (cameras.isEmpty) {
       setState(() => _errorMsg = '未找到摄像头');
@@ -165,20 +208,30 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     _cameraController = CameraController(
       backCamera,
-      ResolutionPreset.high,
+      ResolutionPreset.medium, // 降低分辨率提高初始化速度
       enableAudio: false,
+      // 优化性能设置
+      enableDepthBehavior: false, // 禁用深度感应
     );
 
     await _cameraController!.initialize();
+
+    debugPrint('📷 传统相机初始化: ${DateTime.now().difference(camStart).inMilliseconds}ms');
+
+    // 异步设置对焦，不阻塞初始化
     _applyFocusSettings();
   }
 
   /// 初始化 mobile_scanner（用于二维码/条形码）
   Future<void> _initScanner() async {
+    final scanStart = DateTime.now();
+
     _scannerController = MobileScannerController(
-      detectionSpeed: DetectionSpeed.normal,
+      detectionSpeed: DetectionSpeed.normal, // 使用 normal 而不是 noDuplicates 提高响应速度
       facing: CameraFacing.back,
       torchEnabled: false,
+      // 性能优化设置
+      returnImage: false, // 不返回图像数据，提高性能
       // 支持所有常见条形码格式
       formats: [
         BarcodeFormat.qrCode,
@@ -194,6 +247,29 @@ class _ScannerScreenState extends State<ScannerScreen>
         BarcodeFormat.itf,
       ],
     );
+
+    debugPrint('📱 mobile_scanner 初始化: ${DateTime.now().difference(scanStart).inMilliseconds}ms');
+
+    // 获取支持的缩放范围
+    try {
+      final zoomState = await _scannerController!.getZoomState();
+      if (zoomState != null) {
+        _minZoomScale = zoomState.minZoomScale;
+        _maxZoomScale = zoomState.maxZoomScale;
+        _zoomScale = zoomState.newScale; // 当前缩放比例
+        debugPrint('🔍 缩放范围: $_minZoomScale - $_maxZoomScale');
+      }
+    } catch (e) {
+      debugPrint('⚠️ 获取缩放范围失败: $e');
+    }
+
+    // 监听扫码结果
+    _scannerController!.barcodeStream.listen(
+      _handleBarcodeResult,
+      onError: (error) {
+        debugPrint('扫码错误: $error');
+      },
+    );
   }
 
   /// 处理扫码结果
@@ -206,6 +282,9 @@ class _ScannerScreenState extends State<ScannerScreen>
     if (rawValue == null || rawValue.isEmpty) return;
 
     debugPrint('📱 检测到条码: $rawValue (${barcode.format})');
+
+    // 自动放大和对焦到检测到的条形码区域
+    _autoZoomAndFocus(capture, barcode);
 
     // 绑定模式的特殊处理
     if (_currentMode == ScanMode.bind) {
@@ -282,6 +361,74 @@ class _ScannerScreenState extends State<ScannerScreen>
     });
 
     HapticFeedback.mediumImpact();
+  }
+
+  /// 自动放大和对焦到检测到的条形码
+  void _autoZoomAndFocus(BarcodeCapture capture, Barcode barcode) {
+    if (_isAutoZooming || _maxZoomScale == 0) return;
+
+    // 获取条形码的位置信息
+    final corners = barcode.corners;
+    if (corners == null || corners.isEmpty) return;
+
+    // 计算条形码的中心点
+    double centerX = 0;
+    double centerY = 0;
+    for (final corner in corners) {
+      centerX += corner.x;
+      centerY += corner.y;
+    }
+    centerX /= corners.length;
+    centerY /= corners.length;
+
+    // 转换为相对坐标 (0-1)
+    final normalizedX = centerX / capture.size.width;
+    final normalizedY = centerY / capture.size.height;
+
+    debugPrint('🎯 条形码位置: ($normalizedX, $normalizedY)');
+
+    // 如果当前缩放级别较低，自动放大
+    if (_zoomScale < _maxZoomScale * 0.7) {
+      _isAutoZooming = true;
+
+      // 先对焦到条形码位置
+      _scannerController?.updateScanDirection(
+        normal: normalizedY < 0.5 ? 1 : -1,
+      );
+
+      // 逐步放大到合适级别
+      final targetZoom = _zoomScale + (_maxZoomScale - _zoomScale) * 0.3;
+      _smoothZoomTo(targetZoom);
+
+      // 延迟后重置自动缩放标志
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        _isAutoZooming = false;
+      });
+    }
+  }
+
+  /// 平滑缩放到指定级别
+  Future<void> _smoothZoomTo(double targetZoom) async {
+    if (_scannerController == null) return;
+
+    final steps = 10;
+    final stepSize = (targetZoom - _zoomScale) / steps;
+
+    for (int i = 0; i < steps; i++) {
+      final newZoom = _zoomScale + stepSize * (i + 1);
+      final clampedZoom = newZoom.clamp(_minZoomScale, _maxZoomScale);
+
+      try {
+        await _scannerController!.setZoomScale(clampedZoom);
+        setState(() {
+          _zoomScale = clampedZoom;
+        });
+        await Future.delayed(const Duration(milliseconds: 50));
+      } catch (e) {
+        debugPrint('缩放失败: $e');
+        break;
+      }
+    }
   }
 
   /// 处理设备码识别
@@ -515,6 +662,8 @@ class _ScannerScreenState extends State<ScannerScreen>
       _extractedNumber = null;
       _recognizedText = null;
       _bindWarning = null;
+      _zoomScale = 0.0;
+      _isAutoZooming = false;
       if (_currentMode == ScanMode.bind) {
         _bindingDeviceCode = null;
         _bindStep = _BindStep.device;
@@ -848,10 +997,104 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   /// mobile_scanner 预览（二维码/条形码模式）
   Widget _buildScannerPreview() {
-    return MobileScanner(
-      controller: _scannerController!,
-      onDetect: _handleBarcodeResult,
-      overlay: _buildScanOverlay(),
+    return Stack(
+      children: [
+        MobileScanner(
+          controller: _scannerController!,
+          onDetect: _handleBarcodeResult,
+          overlay: _buildScanOverlay(),
+        ),
+
+        // 缩放控制按钮
+        if (_maxZoomScale > 0)
+          Positioned(
+            right: 16,
+            top: 100,
+            child: Column(
+              children: [
+                // 放大按钮
+                FloatingActionButton.small(
+                  heroTag: 'zoom_in',
+                  backgroundColor: Colors.white.withOpacity(0.8),
+                  onPressed: _zoomScale < _maxZoomScale ? () => _zoomIn() : null,
+                  child: const Icon(Icons.zoom_in, color: Colors.black87),
+                ),
+                const SizedBox(height: 8),
+
+                // 缩放指示器
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.8),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${(_zoomScale * 100).toStringAsFixed(0)}%',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.black87,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+
+                // 缩小按钮
+                FloatingActionButton.small(
+                  heroTag: 'zoom_out',
+                  backgroundColor: Colors.white.withOpacity(0.8),
+                  onPressed: _zoomScale > _minZoomScale ? () => _zoomOut() : null,
+                  child: const Icon(Icons.zoom_out, color: Colors.black87),
+                ),
+                const SizedBox(height: 8),
+
+                // 重置缩放按钮
+                FloatingActionButton.small(
+                  heroTag: 'zoom_reset',
+                  backgroundColor: Colors.blue.withOpacity(0.8),
+                  onPressed: () => _resetZoom(),
+                  child: const Icon(Icons.center_focus_strong, color: Colors.white, size: 16),
+                ),
+              ],
+            ),
+          ),
+
+        // 自动缩放提示
+        if (_isAutoZooming)
+          Positioned(
+            left: 16,
+            top: 100,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.8),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    '自动对焦中...',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+      ],
     );
   }
 
@@ -861,9 +1104,9 @@ class _ScannerScreenState extends State<ScannerScreen>
       case ScanMode.iccid:
         return '将ICCID对准框内，保持约10~20cm距离，点击拍照';
       case ScanMode.qr:
-        return '将二维码对准框内，自动识别';
+        return '将二维码对准框内，自动识别和放大';
       case ScanMode.barcode:
-        return '将条形码对准框内，自动识别';
+        return '将条形码对准框内，自动识别和放大';
       case ScanMode.bind:
         return _bindStep == _BindStep.device
             ? '第1步/共2步：请扫描设备二维码'
@@ -960,9 +1203,9 @@ class _ScannerScreenState extends State<ScannerScreen>
       case ScanMode.iccid:
         return '点击下方按钮拍照识别';
       case ScanMode.qr:
-        return '将二维码对准框内，自动识别';
+        return '将二维码对准框内，自动识别和放大';
       case ScanMode.barcode:
-        return '将条形码对准框内，自动识别';
+        return '将条形码对准框内，自动识别和放大';
       case ScanMode.bind:
         return '请先扫描设备二维码';
     }
@@ -1289,5 +1532,62 @@ class _ScannerScreenState extends State<ScannerScreen>
         ],
       ),
     );
+  }
+
+  /// 放大
+  Future<void> _zoomIn() async {
+    if (_scannerController == null || _isAutoZooming) return;
+
+    final newZoom = (_zoomScale + 0.1).clamp(_minZoomScale, _maxZoomScale);
+    try {
+      await _scannerController!.setZoomScale(newZoom);
+      setState(() {
+        _zoomScale = newZoom;
+      });
+      HapticFeedback.lightImpact();
+    } catch (e) {
+      debugPrint('放大失败: $e');
+    }
+  }
+
+  /// 缩小
+  Future<void> _zoomOut() async {
+    if (_scannerController == null || _isAutoZooming) return;
+
+    final newZoom = (_zoomScale - 0.1).clamp(_minZoomScale, _maxZoomScale);
+    try {
+      await _scannerController!.setZoomScale(newZoom);
+      setState(() {
+        _zoomScale = newZoom;
+      });
+      HapticFeedback.lightImpact();
+    } catch (e) {
+      debugPrint('缩小失败: $e');
+    }
+  }
+
+  /// 重置缩放
+  Future<void> _resetZoom() async {
+    if (_scannerController == null) return;
+
+    try {
+      await _scannerController!.setZoomScale(_minZoomScale);
+      setState(() {
+        _zoomScale = _minZoomScale;
+        _isAutoZooming = false;
+      });
+      HapticFeedback.mediumImpact();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('缩放已重置'),
+            duration: Duration(seconds: 1),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('重置缩放失败: $e');
+    }
   }
 }
