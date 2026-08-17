@@ -55,10 +55,9 @@ class _ScannerScreenState extends State<ScannerScreen>
   // 绑定流程中的重复提示（设备已存在 / 流量卡已存在）
   String? _bindWarning;
 
-  // 连续帧确认状态，用于降低二维码/条形码误识别
+  // 连续帧确认状态，用于降低条形码误识别（二维码不需要）
   String? _pendingValue;
   int _pendingCount = 0;
-  static const int _requiredFrames = 2;
 
   // 取景框扫描线动画
   late final AnimationController _scanLineController = AnimationController(
@@ -177,7 +176,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   /// 初始化 mobile_scanner（用于二维码/条形码）
   Future<void> _initScanner() async {
     _scannerController = MobileScannerController(
-      detectionSpeed: DetectionSpeed.noDuplicates,
+      detectionSpeed: DetectionSpeed.normal,
       facing: CameraFacing.back,
       torchEnabled: false,
       // 支持所有常见条形码格式
@@ -220,8 +219,8 @@ class _ScannerScreenState extends State<ScannerScreen>
           return;
         }
 
-        if (!_confirmStableValue(rawValue)) {
-          debugPrint('设备码确认中... ($_pendingCount/$_requiredFrames)');
+        if (!_confirmStableValue(rawValue, isQrCode: true)) {
+          debugPrint('设备码确认中...');
           return;
         }
 
@@ -237,7 +236,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (rawValue == _bindingDeviceCode) return;
 
       if (!_confirmStableValue(rawValue)) {
-        debugPrint('卡号确认中... ($_pendingCount/$_requiredFrames)');
+        debugPrint('卡号确认中... ($_pendingCount/2)');
         return;
       }
 
@@ -263,8 +262,13 @@ class _ScannerScreenState extends State<ScannerScreen>
       }
     }
 
-    if (!_confirmStableValue(rawValue)) {
-      debugPrint('条码确认中... ($_pendingCount/$_requiredFrames)');
+    final isQr = _currentMode == ScanMode.qr ||
+        barcode.format == BarcodeFormat.qrCode ||
+        barcode.format == BarcodeFormat.dataMatrix ||
+        barcode.format == BarcodeFormat.aztec;
+
+    if (!_confirmStableValue(rawValue, isQrCode: isQr)) {
+      debugPrint('条码确认中... ($_pendingCount/2)');
       return;
     }
 
@@ -322,14 +326,16 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   /// 连续帧确认：同一值需连续识别 N 次才返回 true
-  bool _confirmStableValue(String value) {
+  /// QR码/二维码直接通过（误识别率低），条形码需要连续2帧确认
+  bool _confirmStableValue(String value, {bool isQrCode = false}) {
+    if (isQrCode) return true;
     if (_pendingValue == value) {
       _pendingCount++;
     } else {
       _pendingValue = value;
       _pendingCount = 1;
     }
-    if (_pendingCount >= _requiredFrames) {
+    if (_pendingCount >= 2) {
       _pendingValue = null;
       _pendingCount = 0;
       return true;
