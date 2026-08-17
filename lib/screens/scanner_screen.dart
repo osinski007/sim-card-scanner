@@ -247,6 +247,20 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
 
     debugPrint('📱 mobile_scanner 初始化: ${DateTime.now().difference(scanStart).inMilliseconds}ms');
+
+    // mobile_scanner 4.0.1: zoomScaleState 范围 0.0-1.0
+    _minZoomScale = 0.0;
+    _maxZoomScale = 1.0;
+    _zoomScale = _scannerController!.zoomScaleState.value;
+    debugPrint('🔍 缩放范围: $_minZoomScale - $_maxZoomScale, 当前: $_zoomScale');
+
+    // 监听扫码结果
+    _scannerController!.barcodes.listen(
+      _handleBarcodeResult,
+      onError: (error) {
+        debugPrint('扫码错误: $error');
+      },
+    );
   }
 
   /// 处理扫码结果
@@ -341,15 +355,62 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   /// 自动放大和对焦到检测到的条形码
-  /// mobile_scanner 4.0.1 不支持缩放API，暂为空实现
   void _autoZoomAndFocus(BarcodeCapture capture, Barcode barcode) {
-    // mobile_scanner 4.0.1 无 zoom API，保留接口供后续升级使用
+    if (_isAutoZooming || _maxZoomScale == 0) return;
+
+    final corners = barcode.corners;
+    if (corners.isEmpty) return;
+
+    double centerX = 0;
+    double centerY = 0;
+    for (final corner in corners) {
+      centerX += corner.dx;
+      centerY += corner.dy;
+    }
+    centerX /= corners.length;
+    centerY /= corners.length;
+
+    final normalizedX = centerX / capture.size.width;
+    final normalizedY = centerY / capture.size.height;
+
+    debugPrint('🎯 条形码位置: ($normalizedX, $normalizedY)');
+
+    // mobile_scanner 4.0.1: zoomScaleState 范围 0.0-1.0，当前缩放低于 0.7 时自动放大
+    _zoomScale = _scannerController!.zoomScaleState.value;
+    if (_zoomScale < _maxZoomScale * 0.7) {
+      _isAutoZooming = true;
+
+      final targetZoom = _zoomScale + (_maxZoomScale - _zoomScale) * 0.3;
+      _smoothZoomTo(targetZoom);
+
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        _isAutoZooming = false;
+      });
+    }
   }
 
   /// 平滑缩放到指定级别
-  /// mobile_scanner 4.0.1 不支持缩放API，暂为空实现
   Future<void> _smoothZoomTo(double targetZoom) async {
-    // mobile_scanner 4.0.1 无 zoom API，保留接口供后续升级使用
+    if (_scannerController == null) return;
+
+    final steps = 10;
+    final stepSize = (targetZoom - _zoomScale) / steps;
+
+    for (int i = 0; i < steps; i++) {
+      final newZoom = _zoomScale + stepSize * (i + 1);
+      final clampedZoom = newZoom.clamp(_minZoomScale, _maxZoomScale);
+
+      try {
+        await _scannerController!.setZoomScale(clampedZoom);
+        setState(() {
+          _zoomScale = clampedZoom;
+        });
+        await Future.delayed(const Duration(milliseconds: 50));
+      } catch (e) {
+        debugPrint('缩放失败: $e');
+        break;
+      }
+    }
   }
 
   /// 处理设备码识别
