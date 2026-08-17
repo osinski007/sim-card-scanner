@@ -138,7 +138,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       _initTextRecognizer(),
     ]);
 
-    if (!results[0]) {
+    if (!(results[0] as bool)) {
       setState(() {
         _hasPermission = false;
         _errorMsg = '需要相机权限才能扫描';
@@ -208,10 +208,8 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     _cameraController = CameraController(
       backCamera,
-      ResolutionPreset.medium, // 降低分辨率提高初始化速度
+      ResolutionPreset.medium,
       enableAudio: false,
-      // 优化性能设置
-      enableDepthBehavior: false, // 禁用深度感应
     );
 
     await _cameraController!.initialize();
@@ -249,27 +247,6 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
 
     debugPrint('📱 mobile_scanner 初始化: ${DateTime.now().difference(scanStart).inMilliseconds}ms');
-
-    // 获取支持的缩放范围
-    try {
-      final zoomState = await _scannerController!.getZoomState();
-      if (zoomState != null) {
-        _minZoomScale = zoomState.minZoomScale;
-        _maxZoomScale = zoomState.maxZoomScale;
-        _zoomScale = zoomState.newScale; // 当前缩放比例
-        debugPrint('🔍 缩放范围: $_minZoomScale - $_maxZoomScale');
-      }
-    } catch (e) {
-      debugPrint('⚠️ 获取缩放范围失败: $e');
-    }
-
-    // 监听扫码结果
-    _scannerController!.barcodeStream.listen(
-      _handleBarcodeResult,
-      onError: (error) {
-        debugPrint('扫码错误: $error');
-      },
-    );
   }
 
   /// 处理扫码结果
@@ -364,71 +341,15 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   /// 自动放大和对焦到检测到的条形码
+  /// mobile_scanner 4.0.1 不支持缩放API，暂为空实现
   void _autoZoomAndFocus(BarcodeCapture capture, Barcode barcode) {
-    if (_isAutoZooming || _maxZoomScale == 0) return;
-
-    // 获取条形码的位置信息
-    final corners = barcode.corners;
-    if (corners == null || corners.isEmpty) return;
-
-    // 计算条形码的中心点
-    double centerX = 0;
-    double centerY = 0;
-    for (final corner in corners) {
-      centerX += corner.x;
-      centerY += corner.y;
-    }
-    centerX /= corners.length;
-    centerY /= corners.length;
-
-    // 转换为相对坐标 (0-1)
-    final normalizedX = centerX / capture.size.width;
-    final normalizedY = centerY / capture.size.height;
-
-    debugPrint('🎯 条形码位置: ($normalizedX, $normalizedY)');
-
-    // 如果当前缩放级别较低，自动放大
-    if (_zoomScale < _maxZoomScale * 0.7) {
-      _isAutoZooming = true;
-
-      // 先对焦到条形码位置
-      _scannerController?.updateScanDirection(
-        normal: normalizedY < 0.5 ? 1 : -1,
-      );
-
-      // 逐步放大到合适级别
-      final targetZoom = _zoomScale + (_maxZoomScale - _zoomScale) * 0.3;
-      _smoothZoomTo(targetZoom);
-
-      // 延迟后重置自动缩放标志
-      Future.delayed(const Duration(milliseconds: 1500), () {
-        _isAutoZooming = false;
-      });
-    }
+    // mobile_scanner 4.0.1 无 zoom API，保留接口供后续升级使用
   }
 
   /// 平滑缩放到指定级别
+  /// mobile_scanner 4.0.1 不支持缩放API，暂为空实现
   Future<void> _smoothZoomTo(double targetZoom) async {
-    if (_scannerController == null) return;
-
-    final steps = 10;
-    final stepSize = (targetZoom - _zoomScale) / steps;
-
-    for (int i = 0; i < steps; i++) {
-      final newZoom = _zoomScale + stepSize * (i + 1);
-      final clampedZoom = newZoom.clamp(_minZoomScale, _maxZoomScale);
-
-      try {
-        await _scannerController!.setZoomScale(clampedZoom);
-        setState(() {
-          _zoomScale = clampedZoom;
-        });
-        await Future.delayed(const Duration(milliseconds: 50));
-      } catch (e) {
-        debugPrint('缩放失败: $e');
-        break;
-      }
-    }
+    // mobile_scanner 4.0.1 无 zoom API，保留接口供后续升级使用
   }
 
   /// 处理设备码识别
