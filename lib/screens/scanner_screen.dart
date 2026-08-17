@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:camera/camera.dart';
-import 'package:google_mlkit_barcode_scanning/google_mlkit_barcode_scanning.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../models/device_binding.dart';
@@ -19,6 +19,7 @@ enum ScanMode { iccid, qr, barcode, bind }
 enum _BindStep { device, card }
 
 /// 扫描页面 - ICCID 拍照识别 + 二维码/条形码实时扫描 + 设备-卡绑定
+/// 使用 mobile_scanner 提供高性能条码识别
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key, this.onViewRecords});
 
@@ -31,24 +32,21 @@ class ScannerScreen extends StatefulWidget {
 
 class _ScannerScreenState extends State<ScannerScreen>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
+  // ICCID 模式使用传统相机
   CameraController? _cameraController;
   TextRecognizer? _textRecognizer;
-  BarcodeScanner? _qrScanner;
-  BarcodeScanner? _barcodeScanner;
+
+  // 二维码/条形码模式使用 mobile_scanner
+  MobileScannerController? _scannerController;
 
   ScanMode _currentMode = ScanMode.iccid;
 
   bool _hasPermission = false;
   bool _isInitialized = false;
   bool _isProcessing = false;
-  bool _isStreaming = false;
   String? _extractedNumber;
   String? _errorMsg;
   String? _recognizedText;
-
-  // 帧处理节流：跳过部分帧以提高识别成功率
-  int _frameCount = 0;
-  static const int _frameSkip = 2; // 每3帧处理1帧
 
   // 绑定模式状态
   _BindStep _bindStep = _BindStep.device;
@@ -60,13 +58,16 @@ class _ScannerScreenState extends State<ScannerScreen>
   // 连续帧确认状态，用于降低二维码/条形码误识别
   String? _pendingValue;
   int _pendingCount = 0;
-  static const int _requiredFrames = 3; // 提高到3帧确认，降低误识
+  static const int _requiredFrames = 2;
 
-  // 取景框扫描线动画，让扫描区域看起来是实时动态的
+  // 取景框扫描线动画
   late final AnimationController _scanLineController = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1800),
   )..repeat(reverse: true);
+
+  // 扫描统计
+  int _scanCount = 0;
 
   @override
   void initState() {
@@ -82,16 +83,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     switch (state) {
       case AppLifecycleState.inactive:
       case AppLifecycleState.paused:
-        if (_cameraController != null && _isInitialized) {
-          debugPrint('释放相机资源');
-          _stopStream();
-          _cameraController?.dispose();
-          _cameraController = null;
-          setState(() {
-            _isInitialized = false;
-            _isStreaming = false;
-          });
-        }
+        _releaseResources();
         break;
       case AppLifecycleState.resumed:
         debugPrint('重新初始化相机');
@@ -108,12 +100,22 @@ class _ScannerScreenState extends State<ScannerScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _scanLineController.dispose();
-    _stopStream();
-    _cameraController?.dispose();
+    _releaseResources();
     _textRecognizer?.close();
-    _qrScanner?.close();
-    _barcodeScanner?.close();
     super.dispose();
+  }
+
+  void _releaseResources() {
+    if (_currentMode == ScanMode.iccid) {
+      _cameraController?.dispose();
+      _cameraController = null;
+    } else {
+      _scannerController?.dispose();
+      _scannerController = null;
+    }
+    setState(() {
+      _isInitialized = false;
+    });
   }
 
   Future<void> _initCamera() async {
@@ -133,282 +135,205 @@ class _ScannerScreenState extends State<ScannerScreen>
     setState(() => _hasPermission = true);
 
     try {
-      // ML Kit 识别器按需创建一次（构造函数很轻量，模型在首次识别时才加载）
+      // ML Kit 文本识别器（仅用于 ICCID 模式）
       _textRecognizer ??= TextRecognizer();
 
-      // 二维码扫描器 - 支持常见二维码格式
-      _qrScanner ??= BarcodeScanner(
-        formats: [
-          BarcodeFormat.qrCode,
-          BarcodeFormat.dataMatrix,
-          BarcodeFormat.aztec, // 支持更多二维码类型
-        ],
-      );
-
-      // 条形码扫描器 - 明确指定常见条形码格式，提高识别准确率
-      _barcodeScanner ??= BarcodeScanner(
-        formats: [
-          // 一维条形码
-          BarcodeFormat.code128,    // 最常见的条形码格式
-          BarcodeFormat.code39,     // 字母数字条形码
-          BarcodeFormat.code93,     // Code39的改进版
-          BarcodeFormat.ean13,      // 商品条码
-          BarcodeFormat.ean8,       // 短商品条码
-          BarcodeFormat.upca,       // UPC-A
-          BarcodeFormat.upce,       // UPC-E
-          // 二维条形码
-          BarcodeFormat.pdf417,
-          BarcodeFormat.dataMatrix,
-          // 其他格式
-          BarcodeFormat.codabar,
-          BarcodeFormat.itf,
-        ],
-      );
-
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) {
-        setState(() => _errorMsg = '未找到摄像头');
-        return;
+      if (_currentMode == ScanMode.iccid) {
+        await _initTraditionalCamera();
+      } else {
+        await _initScanner();
       }
 
-      final backCamera = cameras.firstWhere(
-        (cam) => cam.lensDirection == CameraLensDirection.back,
-        orElse: () => cameras.first,
-      );
-
-      _cameraController = CameraController(
-        backCamera,
-        ResolutionPreset.high,
-        enableAudio: false,
-        // 优化识别性能和图像质量
-        imageFormatGroup: Platform.isAndroid
-            ? ImageFormatGroup.nv21 // Android使用NV21格式
-            : ImageFormatGroup.bgra8888, // iOS使用BGRA8888
-      );
-
-      // 建立 camera2 预览会话（首次打开较慢，属相机系统固有开销）
-      await _cameraController!.initialize();
-
-      // 立即标记初始化完成并显示画面，
-      // 焦点/曝光设置异步执行，不再阻塞“正在初始化”的等待时间
       setState(() => _isInitialized = true);
-      _startStreamIfNeeded();
-      _applyFocusSettings();
     } catch (e) {
       debugPrint('初始化摄像头失败: $e');
       setState(() => _errorMsg = '初始化摄像头失败: $e');
     }
   }
 
-  /// 应用焦点/曝光设置（异步执行，不阻塞相机初始化）
-  ///
-  /// 优化点：
-  /// 1. 使用连续自动对焦模式，确保近距离物体也能清晰
-  /// 2. 设置合适的曝光点，避免过暗或过亮
-  /// 3. 增加重试机制提高成功率
-  Future<void> _applyFocusSettings() async {
-    final cam = _cameraController;
-    if (cam == null || !cam.value.isInitialized) return;
-
-    // 重试几次以确保设置成功
-    for (int i = 0; i < 3; i++) {
-      try {
-        await Future.delayed(Duration(milliseconds: 100 * i));
-
-        // FocusMode.auto 在 Android 上对应 CONTROL_AF_MODE_CONTINUOUS_PICTURE，
-        // 即持续自动对焦，对近距离/屏幕上的二维码、条形码识别至关重要，
-        // 避免长时间对不上焦导致一直识别失败。
-        await cam.setFocusMode(FocusMode.auto);
-        await cam.setExposureMode(ExposureMode.auto);
-
-        // 设置中心对焦点和测光点
-        await cam.setFocusPoint(const Offset(0.5, 0.5));
-        await cam.setExposurePoint(const Offset(0.5, 0.5));
-
-        // 尝试设置更高的帧率以提高识别响应速度
-        try {
-          await cam.setFlashMode(FlashMode.off);
-        } catch (_) {}
-
-        debugPrint('对焦设置应用成功');
-        break;
-      } catch (e) {
-        debugPrint('对焦设置尝试 $i 失败: $e');
-        if (i == 2) {
-          // 最后一次尝试失败，但不阻塞初始化
-          debugPrint('对焦设置最终失败，但相机仍可使用');
-        }
-      }
-    }
-  }
-
-  /// 切换扫描模式
-  void _onModeChanged(ScanMode mode) {
-    if (mode == _currentMode) return;
-    _stopStream();
-    _clearPendingScan();
-    setState(() {
-      _currentMode = mode;
-      _extractedNumber = null;
-      _recognizedText = null;
-      _bindWarning = null;
-      if (mode != ScanMode.bind) {
-        _bindingDeviceCode = null;
-        _bindStep = _BindStep.device;
-      }
-    });
-    _startStreamIfNeeded();
-    _focusAtCenter();
-  }
-
-  void _stopStream() {
-    if (_isStreaming && _cameraController != null) {
-      try {
-        _cameraController!.stopImageStream();
-      } catch (e) {
-        debugPrint('停止图像流失败: $e');
-      }
-      _isStreaming = false;
-    }
-  }
-
-  /// 二维码/条形码/绑定模式启动实时扫描
-  void _startStreamIfNeeded() {
-    if (_currentMode == ScanMode.iccid) return;
-    if (!_isInitialized || _cameraController == null) return;
-    if (_isStreaming) return;
-    if (_currentMode == ScanMode.bind &&
-        _bindingDeviceCode != null &&
-        _extractedNumber != null) {
+  /// 初始化传统相机（用于 ICCID 文字识别）
+  Future<void> _initTraditionalCamera() async {
+    final cameras = await availableCameras();
+    if (cameras.isEmpty) {
+      setState(() => _errorMsg = '未找到摄像头');
       return;
     }
-    if (_currentMode != ScanMode.bind && _extractedNumber != null) return;
 
-    try {
-      _cameraController!.startImageStream(_processCameraFrame);
-      _isStreaming = true;
-    } catch (e) {
-      debugPrint('启动图像流失败: $e');
-    }
+    final backCamera = cameras.firstWhere(
+      (cam) => cam.lensDirection == CameraLensDirection.back,
+      orElse: () => cameras.first,
+    );
 
-    // 启动图像流后重新触发一次中心对焦，让镜头尽快对准画面中心区域
-    _focusAtCenter();
+    _cameraController = CameraController(
+      backCamera,
+      ResolutionPreset.high,
+      enableAudio: false,
+    );
+
+    await _cameraController!.initialize();
+    _applyFocusSettings();
   }
 
-  /// 处理实时帧，识别二维码/条形码
-  Future<void> _processCameraFrame(CameraImage cameraImage) async {
+  /// 初始化 mobile_scanner（用于二维码/条形码）
+  Future<void> _initScanner() async {
+    _scannerController = MobileScannerController(
+      detectionSpeed: DetectionSpeed.noDuplicates,
+      facing: CameraFacing.back,
+      torchEnabled: false,
+      // 支持所有常见条形码格式
+      formats: [
+        BarcodeFormat.qrCode,
+        BarcodeFormat.dataMatrix,
+        BarcodeFormat.aztec,
+        BarcodeFormat.code128,
+        BarcodeFormat.code39,
+        BarcodeFormat.code93,
+        BarcodeFormat.ean13,
+        BarcodeFormat.ean8,
+        BarcodeFormat.upca,
+        BarcodeFormat.upce,
+        BarcodeFormat.pdf417,
+        BarcodeFormat.codabar,
+        BarcodeFormat.itf,
+      ],
+      // mobile_scanner 内置优化
+      autoCorrect: true, // 自动校正倾斜条码
+    );
+
+    // 监听扫码结果
+    _scannerController!.barcodeStream.listen(
+      _handleBarcodeResult,
+      onError: (error) {
+        debugPrint('扫码错误: $error');
+      },
+    );
+  }
+
+  /// 处理扫码结果
+  void _handleBarcodeResult(BarcodeCapture capture) {
     if (_isProcessing) return;
+    if (_extractedNumber != null && _currentMode != ScanMode.bind) return;
 
-    // 帧节流：每N帧处理一次，避免过度处理导致的性能问题
-    _frameCount++;
-    if (_frameCount % (_frameSkip + 1) != 0) {
-      return;
-    }
+    final barcode = capture.barcaces.first;
+    final rawValue = barcode.rawValue;
+    if (rawValue == null || rawValue.isEmpty) return;
 
-    _isProcessing = true;
+    debugPrint('📱 检测到条码: $rawValue (${barcode.format})');
 
-    try {
-      final inputImage = _inputImageFromCameraImage(cameraImage);
-      if (inputImage == null) return;
+    // 绑定模式的特殊处理
+    if (_currentMode == ScanMode.bind) {
+      if (_bindingDeviceCode == null) {
+        // 阶段1：识别设备二维码
+        if (_bindStep != _BindStep.device) return;
 
-      // 绑定模式：先扫设备二维码，再扫流量卡条形码
-      if (_currentMode == ScanMode.bind) {
-        if (_bindingDeviceCode == null) {
-          // 阶段1：识别设备二维码
-          if (_bindStep != _BindStep.device) return;
-          final barcodes = await _qrScanner?.processImage(inputImage);
-          if (barcodes == null || barcodes.isEmpty) return;
-          final value = barcodes
-              .where((b) => b.rawValue != null && b.rawValue!.isNotEmpty)
-              .map((b) => b.rawValue!)
-              .firstOrNull;
-          if (value == null) return;
-          // 连续帧确认，避免误识别
-          if (!_confirmStableValue(value)) return;
-          debugPrint('✅ 识别到设备码: $value');
-          // 不停止图像流，识别后自动切换为扫描流量卡条形码；
-          // 保留已识别的流量卡号（设备码重扫场景下不删除条形码结果）
-          if (!mounted) return;
-          final existing = await context.read<ScanProvider>().findBindingByDeviceCode(value);
-          if (!mounted) return;
-          setState(() {
-            _bindingDeviceCode = value;
-            _bindStep = _BindStep.card;
-            _bindWarning = existing != null ? '当前设备已存在：已绑定流量卡 ${existing.cardNumber}' : null;
-          });
-          if (existing != null) {
-            _showBindWarning('当前设备已存在：已绑定流量卡 ${existing.cardNumber}');
-          }
-          HapticFeedback.mediumImpact();
+        // 只接受二维码格式作为设备码
+        if (barcode.format != BarcodeFormat.qrCode &&
+            barcode.format != BarcodeFormat.dataMatrix) {
           return;
         }
-        // 阶段2：识别流量卡条形码
-        if (_extractedNumber != null) return;
-        final barcodes = await _barcodeScanner?.processImage(inputImage);
-        if (barcodes == null || barcodes.isEmpty) return;
-        String? value;
-        for (final barcode in barcodes) {
-          final v = barcode.rawValue;
-          if (v == null || v.isEmpty) continue;
-          // 用户尚未更换码时，设备二维码可能仍被识别，跳过与设备码相同的结果
-          if (_bindingDeviceCode != null && v == _bindingDeviceCode) continue;
-          value = v;
-          break;
+
+        if (!_confirmStableValue(rawValue)) {
+          debugPrint('设备码确认中... ($_pendingCount/$_requiredFrames)');
+          return;
         }
-        if (value == null) return;
-        // 连续帧确认，降低误识别
-        if (!_confirmStableValue(value)) return;
-        debugPrint('✅ 识别到卡号: $value');
-        _stopStream();
-        if (!mounted) return;
-        final existing = await context.read<ScanProvider>().findBindingByCardNumber(value);
-        if (!mounted) return;
-        setState(() {
-          _extractedNumber = value;
-          _recognizedText = value;
-          _bindWarning = existing != null ? '该流量卡已存在：已绑定设备 ${existing.deviceCode}' : null;
-        });
-        if (existing != null) {
-          _showBindWarning('该流量卡已存在：已绑定设备 ${existing.deviceCode}');
-        }
-        HapticFeedback.mediumImpact();
+
+        debugPrint('✅ 识别到设备码: $rawValue');
+        _handleDeviceCodeRecognized(rawValue);
         return;
       }
 
+      // 阶段2：识别流量卡条形码
       if (_extractedNumber != null) return;
-      final scanner = _currentMode == ScanMode.qr ? _qrScanner : _barcodeScanner;
-      if (scanner == null) return;
 
-      final barcodes = await scanner.processImage(inputImage);
-      if (barcodes.isEmpty) return;
+      // 跳过与设备码相同的结果
+      if (rawValue == _bindingDeviceCode) return;
 
-      String? value;
-      for (final barcode in barcodes) {
-        final v = barcode.rawValue;
-        if (v == null || v.isEmpty) continue;
-        value = v;
-        break;
+      if (!_confirmStableValue(rawValue)) {
+        debugPrint('卡号确认中... ($_pendingCount/$_requiredFrames)');
+        return;
       }
-      if (value == null) return;
-      // 连续帧确认，降低误识别
-      if (!_confirmStableValue(value)) return;
 
-      debugPrint('✅ 识别到条码: $value');
-      _stopStream();
-      if (!mounted) return;
-      setState(() {
-        _extractedNumber = value;
-        _recognizedText = value;
-      });
-      HapticFeedback.mediumImpact();
-    } catch (e) {
-      // 单帧处理失败忽略，继续下一帧
-    } finally {
-      _isProcessing = false;
+      debugPrint('✅ 识别到卡号: $rawValue');
+      _handleCardNumberRecognized(rawValue);
+      return;
     }
+
+    // 普通模式：二维码/条形码识别
+    if (_currentMode == ScanMode.qr) {
+      // 二维码模式：只接受二维码格式
+      if (barcode.format != BarcodeFormat.qrCode &&
+          barcode.format != BarcodeFormat.dataMatrix &&
+          barcode.format != BarcodeFormat.aztec) {
+        return;
+      }
+    } else if (_currentMode == ScanMode.barcode) {
+      // 条形码模式：排除纯二维码格式
+      if (barcode.format == BarcodeFormat.qrCode) {
+        // 如果检测到二维码而不是条形码，提示用户
+        debugPrint('检测到二维码，请使用条形码模式');
+        return;
+      }
+    }
+
+    if (!_confirmStableValue(rawValue)) {
+      debugPrint('条码确认中... ($_pendingCount/$_requiredFrames)');
+      return;
+    }
+
+    debugPrint('✅ 识别成功: $rawValue');
+    _scanCount++;
+
+    if (!mounted) return;
+    setState(() {
+      _extractedNumber = rawValue;
+      _recognizedText = rawValue;
+    });
+
+    HapticFeedback.mediumImpact();
   }
 
-  /// 连续帧确认：同一值需连续识别 N 次才返回 true，降低误识别率
+  /// 处理设备码识别
+  Future<void> _handleDeviceCodeRecognized(String deviceCode) async {
+    if (!mounted) return;
+    final existing = await context.read<ScanProvider>().findBindingByDeviceCode(deviceCode);
+    if (!mounted) return;
+
+    setState(() {
+      _bindingDeviceCode = deviceCode;
+      _bindStep = _BindStep.card;
+      _bindWarning = existing != null ? '当前设备已存在：已绑定流量卡 ${existing.cardNumber}' : null;
+    });
+
+    if (existing != null) {
+      _showBindWarning('当前设备已存在：已绑定流量卡 ${existing.cardNumber}');
+    }
+
+    HapticFeedback.mediumImpact();
+  }
+
+  /// 处理卡号识别
+  Future<void> _handleCardNumberRecognized(String cardNumber) async {
+    if (!mounted) return;
+    final existing = await context.read<ScanProvider>().findBindingByCardNumber(cardNumber);
+    if (!mounted) return;
+
+    // 暂停扫描
+    _scannerController?.stop();
+
+    setState(() {
+      _extractedNumber = cardNumber;
+      _recognizedText = cardNumber;
+      _bindWarning = existing != null ? '该流量卡已存在：已绑定设备 ${existing.deviceCode}' : null;
+    });
+
+    if (existing != null) {
+      _showBindWarning('该流量卡已存在：已绑定设备 ${existing.deviceCode}');
+    }
+
+    HapticFeedback.mediumImpact();
+  }
+
+  /// 连续帧确认：同一值需连续识别 N 次才返回 true
   bool _confirmStableValue(String value) {
     if (_pendingValue == value) {
       _pendingCount++;
@@ -427,221 +352,41 @@ class _ScannerScreenState extends State<ScannerScreen>
   void _clearPendingScan() {
     _pendingValue = null;
     _pendingCount = 0;
-    _frameCount = 0;
+    _scanCount = 0;
   }
 
-  /// 弹出绑定重复提示
-  void _showBindWarning(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.orange.shade700,
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+  /// 切换扫描模式
+  void _onModeChanged(ScanMode mode) {
+    if (mode == _currentMode) return;
+
+    // 释放当前资源
+    _releaseResources();
+    _clearPendingScan();
+
+    setState(() {
+      _currentMode = mode;
+      _extractedNumber = null;
+      _recognizedText = null;
+      _bindWarning = null;
+      _isInitialized = false;
+      if (mode != ScanMode.bind) {
+        _bindingDeviceCode = null;
+        _bindStep = _BindStep.device;
+      }
+    });
+
+    // 重新初始化
+    _initCamera();
   }
 
-  /// 将相机帧转换为 ML Kit InputImage
-  ///
-  /// 优化点：
-  /// 1. 添加图像有效性检查，避免处理损坏数据
-  /// 2. 优化 NV21 转换逻辑，确保数据格式正确
-  /// 3. 添加更详细的错误日志便于调试
-  InputImage? _inputImageFromCameraImage(CameraImage image) {
-    final camera = _cameraController?.description;
-    if (camera == null) {
-      debugPrint('相机描述不可用');
-      return null;
-    }
-
-    // 验证图像尺寸
-    if (image.width <= 0 || image.height <= 0) {
-      debugPrint('无效的图像尺寸: ${image.width}x${image.height}');
-      return null;
-    }
-
-    InputImageRotation imageRotation;
-    switch (camera.sensorOrientation) {
-      case 90:
-        imageRotation = InputImageRotation.rotation90deg;
-        break;
-      case 180:
-        imageRotation = InputImageRotation.rotation180deg;
-        break;
-      case 270:
-        imageRotation = InputImageRotation.rotation270deg;
-        break;
-      default:
-        imageRotation = InputImageRotation.rotation0deg;
-    }
-
-    final size = Size(image.width.toDouble(), image.height.toDouble());
-
-    if (Platform.isAndroid) {
-      final nv21 = _convertToNv21(image);
-      if (nv21 == null) {
-        debugPrint('NV21转换失败');
-        return null;
-      }
-
-      // 验证转换后的数据大小
-      final expectedSize = image.width * image.height * 3 ~/ 2;
-      if (nv21.length != expectedSize) {
-        debugPrint('NV21数据大小不匹配: 期望=$expectedSize, 实际=${nv21.length}');
-        return null;
-      }
-
-      return InputImage.fromBytes(
-        bytes: nv21,
-        metadata: InputImageMetadata(
-          size: size,
-          rotation: imageRotation,
-          format: InputImageFormat.nv21,
-          bytesPerRow: image.width,
-        ),
-      );
-    }
-
-    // iOS: BGRA8888 直接拼接各平面
-    try {
-      final bgra = _concatenatePlanes(image.planes);
-      final expectedSize = image.width * image.height * 4;
-      if (bgra.length != expectedSize) {
-        debugPrint('BGRA数据大小不匹配: 期望=$expectedSize, 实际=${bgra.length}');
-        return null;
-      }
-
-      return InputImage.fromBytes(
-        bytes: bgra,
-        metadata: InputImageMetadata(
-          size: size,
-          rotation: imageRotation,
-          format: InputImageFormat.bgra8888,
-          bytesPerRow: image.planes.first.bytesPerRow,
-        ),
-      );
-    } catch (e) {
-      debugPrint('iOS图像转换失败: $e');
-      return null;
-    }
-  }
-
-  Uint8List _concatenatePlanes(List<Plane> planes) {
-    final WriteBuffer allBytes = WriteBuffer();
-    for (final plane in planes) {
-      allBytes.putUint8List(plane.bytes);
-    }
-    return allBytes.done().buffer.asUint8List();
-  }
-
-  /// 将 CameraImage 转换为无行填充的标准 NV21 字节流（Y 平面 + VU 交错）。
-  ///
-  /// 优化后的转换逻辑，处理两种常见布局：
-  /// - Y 平面存在行填充（bytesPerRow > width）时逐行去除填充；
-  /// - UV 为分离平面（pixelStride=1）时按 NV21 顺序交错 V、U；
-  /// - UV 已交错（pixelStride=2）时直接拷贝。
-  ///
-  /// 增加了边界检查和错误处理，避免数组越界。
-  Uint8List? _convertToNv21(CameraImage image) {
-    try {
-      final width = image.width;
-      final height = image.height;
-      if (width <= 0 || height <= 0 || image.planes.length < 3) {
-        debugPrint('无效的图像参数: width=$width, height=$height, planes=${image.planes.length}');
-        return null;
-      }
-
-      final yPlane = image.planes[0];
-      final yRowStride = yPlane.bytesPerRow;
-      final out = Uint8List(width * height * 3 ~/ 2);
-      var outPos = 0;
-
-      // 拷贝 Y 平面，处理行填充
-      if (yRowStride == width) {
-        // 无行填充，直接拷贝
-        if (yPlane.bytes.length >= width * height) {
-          out.setRange(0, width * height, yPlane.bytes, 0);
-          outPos = width * height;
-        } else {
-          debugPrint('Y平面数据不足: 需要${width * height}, 实际${yPlane.bytes.length}');
-          return null;
-        }
-      } else {
-        // 有行填充，逐行拷贝并去除填充
-        for (var row = 0; row < height; row++) {
-          final start = row * yRowStride;
-          if (start + width > yPlane.bytes.length) {
-            debugPrint('Y平面行数据越界: row=$row, start=$start, width=$width, total=${yPlane.bytes.length}');
-            return null;
-          }
-          out.setRange(outPos, outPos + width, yPlane.bytes, start);
-          outPos += width;
-        }
-      }
-
-      final uPlane = image.planes[1];
-      final vPlane = image.planes[2];
-      final uRowStride = uPlane.bytesPerRow;
-      final vRowStride = vPlane.bytesPerRow;
-      final uPixelStride = uPlane.bytesPerPixel ?? 1;
-      final vPixelStride = vPlane.bytesPerPixel ?? 1;
-      final uvWidth = width ~/ 2;
-      final uvHeight = height ~/ 2;
-      final uvBytes = uvWidth * uvHeight * 2;
-
-      // 验证UV平面数据大小
-      if (uPlane.bytes.length < uvBytes / 2 || vPlane.bytes.length < uvBytes / 2) {
-        debugPrint('UV平面数据不足');
-        return null;
-      }
-
-      // 若 UV 已是 NV21 交错布局（pixelStride=2），直接拷贝
-      if (uPixelStride == 2 && vPixelStride == 2) {
-        if (outPos + uvBytes <= out.length) {
-          final uvData = uPlane.bytes.length >= uvBytes ? uPlane.bytes : vPlane.bytes;
-          if (uvData.length >= uvBytes) {
-            out.setRange(outPos, outPos + uvBytes, uvData, 0);
-            return out;
-          } else {
-            debugPrint('交错UV数据不足: 需要$uvBytes, 实际${uvData.length}');
-          }
-        } else {
-          debugPrint('输出缓冲区溢出');
-        }
-      }
-
-      // 分离平面：逐像素交错 V、U
-      for (var row = 0; row < uvHeight; row++) {
-        for (var col = 0; col < uvWidth; col++) {
-          final uIndex = row * uRowStride + col * uPixelStride;
-          final vIndex = row * vRowStride + col * vPixelStride;
-
-          if (uIndex >= uPlane.bytes.length || vIndex >= vPlane.bytes.length) {
-            debugPrint('UV索引越界: uIndex=$uIndex(${uPlane.bytes.length}), vIndex=$vIndex(${vPlane.bytes.length})');
-            continue;
-          }
-          if (outPos + 1 >= out.length) {
-            debugPrint('输出缓冲区溢出: outPos=$outPos, length=${out.length}');
-            return out;
-          }
-
-          out[outPos++] = vPlane.bytes[vIndex];
-          out[outPos++] = uPlane.bytes[uIndex];
-        }
-      }
-      return out;
-    } catch (e, stackTrace) {
-      debugPrint('NV21 转换异常: $e\n$stackTrace');
-      return null;
-    }
-  }
-
-  /// 将对焦/测光点置于画面中央并触发一次对焦
-  Future<void> _focusAtCenter() async {
+  /// 应用焦点/曝光设置
+  Future<void> _applyFocusSettings() async {
     final cam = _cameraController;
     if (cam == null || !cam.value.isInitialized) return;
+
     try {
+      await cam.setFocusMode(FocusMode.auto);
+      await cam.setExposureMode(ExposureMode.auto);
       await cam.setFocusPoint(const Offset(0.5, 0.5));
       await cam.setExposurePoint(const Offset(0.5, 0.5));
     } catch (_) {}
@@ -660,7 +405,6 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     try {
       try {
-        // setFocusMode(locked) 会触发一次对焦扫描，等待足够时间让镜头稳定
         await _cameraController!.setFocusMode(FocusMode.locked);
         await _cameraController!.setExposureMode(ExposureMode.locked);
         await Future.delayed(const Duration(milliseconds: 400));
@@ -758,22 +502,16 @@ class _ScannerScreenState extends State<ScannerScreen>
     return null;
   }
 
-  Future<void> _onTapDown(TapDownDetails details) async {
-    if (_cameraController == null || !_cameraController!.value.isInitialized) return;
-
-    try {
-      final RenderBox box = context.findRenderObject() as RenderBox;
-      final localPosition = box.globalToLocal(details.globalPosition);
-      final size = MediaQuery.of(context).size;
-      final x = localPosition.dx / size.width;
-      final y = localPosition.dy / size.height;
-
-      await _cameraController!.setFocusPoint(Offset(x, y));
-      await _cameraController!.setExposurePoint(Offset(x, y));
-      HapticFeedback.lightImpact();
-    } catch (e) {
-      debugPrint('对焦失败: $e');
-    }
+  /// 弹出绑定重复提示
+  void _showBindWarning(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: Colors.orange.shade700,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   /// 清除当前结果并继续扫描
@@ -786,37 +524,34 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (_currentMode == ScanMode.bind) {
         _bindingDeviceCode = null;
         _bindStep = _BindStep.device;
+        // 重新启动扫描
+        _scannerController?.start();
+      } else {
+        _scannerController?.start();
       }
     });
-    _startStreamIfNeeded();
-    _focusAtCenter();
   }
 
-  /// 绑定模式：仅重新扫描设备二维码。
-  /// 保留已识别的流量卡号，重扫成功后直接回到确认页，不跳回第1步丢失条形码。
+  /// 绑定模式：仅重新扫描设备二维码
   void _rescanDeviceCode() {
-    _stopStream();
     _clearPendingScan();
+    _scannerController?.start();
     setState(() {
       _bindingDeviceCode = null;
       _bindWarning = null;
       _bindStep = _BindStep.device;
     });
-    _startStreamIfNeeded();
-    _focusAtCenter();
   }
 
-  /// 绑定模式：仅重新扫描流量卡条形码（不影响已识别的设备码）
+  /// 绑定模式：仅重新扫描流量卡条形码
   void _rescanCardNumber() {
-    _stopStream();
     _clearPendingScan();
+    _scannerController?.start();
     setState(() {
       _extractedNumber = null;
       _recognizedText = null;
       _bindWarning = null;
     });
-    _startStreamIfNeeded();
-    _focusAtCenter();
   }
 
   /// 绑定模式：确认绑定设备与流量卡
@@ -982,7 +717,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       );
     }
 
-    if (!_isInitialized || _cameraController == null) {
+    if (!_isInitialized) {
       return Scaffold(
         appBar: AppBar(title: const Text('扫描')),
         body: const Center(
@@ -1049,43 +784,42 @@ class _ScannerScreenState extends State<ScannerScreen>
           ),
           Expanded(
             flex: 3,
-            child: GestureDetector(
-              onTapDown: _onTapDown,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  _buildCameraPreview(),
-                  _buildScanOverlay(),
-                  Positioned(
-                    bottom: 16,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: Text(
-                        _getScanHint(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          backgroundColor: Colors.black54,
-                        ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                _currentMode == ScanMode.iccid
+                    ? _buildCameraPreview()
+                    : _buildScannerPreview(),
+                _buildScanOverlay(),
+                Positioned(
+                  bottom: 16,
+                  left: 0,
+                  right: 0,
+                  child: Center(
+                    child: Text(
+                      _getScanHint(),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        backgroundColor: Colors.black54,
                       ),
                     ),
                   ),
-                  if (_isProcessing && _currentMode == ScanMode.iccid)
-                    Container(
-                      color: Colors.black54,
-                      child: const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            CircularProgressIndicator(color: Colors.white),
-                            SizedBox(height: 16),
-                            Text('正在识别...', style: TextStyle(color: Colors.white)),
-                          ],
-                        ),
+                ),
+                if (_isProcessing && _currentMode == ScanMode.iccid)
+                  Container(
+                    color: Colors.black54,
+                    child: const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircularProgressIndicator(color: Colors.white),
+                          SizedBox(height: 16),
+                          Text('正在识别...', style: TextStyle(color: Colors.white)),
+                        ],
                       ),
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
           Container(
@@ -1103,144 +837,150 @@ class _ScannerScreenState extends State<ScannerScreen>
             ),
             child: _currentMode == ScanMode.bind
                 ? _buildBindPanel()
-                : Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('识别结果', style: Theme.of(context).textTheme.titleSmall),
-                      const SizedBox(height: 8),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: Text(
-                          _extractedNumber ?? _getResultHint(),
-                          textAlign: TextAlign.center,
-                          maxLines: 3,
-                          overflow: TextOverflow.ellipsis,
-                          style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                            fontWeight: FontWeight.bold,
-                            color: _extractedNumber != null ? Colors.green : Colors.grey,
-                            fontFamily: 'monospace',
-                            letterSpacing: 1,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      if (_currentMode == ScanMode.iccid)
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: _isProcessing ? null : _takePictureAndRecognize,
-                            icon: const Icon(Icons.camera_alt),
-                            label: Text(_isProcessing ? '识别中...' : '拍照识别'),
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              backgroundColor: Colors.blue,
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                        )
-                      else
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: null,
-                            icon: const Icon(Icons.radar),
-                            label: Text(_isStreaming ? '扫描中...' : '扫描已暂停'),
-                            style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 16),
-                              backgroundColor: Colors.blueGrey.shade200,
-                              foregroundColor: Colors.white,
-                              disabledBackgroundColor: Colors.blueGrey.shade200,
-                              disabledForegroundColor: Colors.white,
-                            ),
-                          ),
-                        ),
-                      if (_extractedNumber != null) ...[
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: _saveRecord,
-                                icon: const Icon(Icons.save),
-                                label: const Text('保存'),
-                                style: ElevatedButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(vertical: 14),
-                                  backgroundColor: Colors.green,
-                                  foregroundColor: Colors.white,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            ElevatedButton.icon(
-                              onPressed: _resetResult,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('重新扫描'),
-                              style: ElevatedButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
+                : _buildNormalPanel(),
           ),
         ],
       ),
     );
   }
 
-  /// 相机预览：按镜头真实宽高比以 cover 方式铺满预览区域，且不做缩放变换。
-  ///
-  /// CameraPreview 内部按当前屏幕方向计算渲染宽高比（竖屏下为 1/aspectRatio），
-  /// 这里用相同公式算出能铺满区域的尺寸，再通过纯布局 + 裁剪呈现：
-  /// - 不拉伸变形（之前外层误用 AspectRatio(aspectRatio) 把画面压扁了）；
-  /// - 不使用 FittedBox/Transform 缩放（部分 Android 设备上相机纹理在变换
-  ///   缩放下无法渲染，预览变成灰白色）。
+  /// 传统相机预览（ICCID 模式）
   Widget _buildCameraPreview() {
-    final cam = _cameraController;
-    if (cam == null || !cam.value.isInitialized) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
       return const SizedBox.shrink();
     }
+    return CameraPreview(_cameraController!);
+  }
 
-    final DeviceOrientation orientation = cam.value.previewPauseOrientation ??
-        cam.value.lockedCaptureOrientation ??
-        cam.value.deviceOrientation;
-    final bool landscape = orientation == DeviceOrientation.landscapeLeft ||
-        orientation == DeviceOrientation.landscapeRight;
-    // 与 CameraPreview 内部一致的渲染宽高比（宽/高）
-    final double renderAspect =
-        landscape ? cam.value.aspectRatio : 1 / cam.value.aspectRatio;
-
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final double maxW = constraints.maxWidth;
-        final double maxH = constraints.maxHeight;
-
-        double w;
-        double h;
-        if (maxW / maxH < renderAspect) {
-          // 预览区域比画面更“瘦高”：以高度铺满，两侧溢出后裁剪
-          h = maxH;
-          w = h * renderAspect;
-        } else {
-          w = maxW;
-          h = w / renderAspect;
-        }
-
-        return ClipRect(
-          child: Center(
-            child: SizedBox(
-              width: w,
-              height: h,
-              child: CameraPreview(cam),
-            ),
-          ),
-        );
-      },
+  /// mobile_scanner 预览（二维码/条形码模式）
+  Widget _buildScannerPreview() {
+    return MobileScanner(
+      controller: _scannerController!,
+      onDetect: _handleBarcodeResult,
+      overlay: _buildScanOverlay(),
+      placeholder: Container(
+        color: Colors.black,
+        child: const Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        ),
+      ),
     );
   }
 
+  /// 底部提示文字
+  String _getScanHint() {
+    switch (_currentMode) {
+      case ScanMode.iccid:
+        return '将ICCID对准框内，保持约10~20cm距离，点击拍照';
+      case ScanMode.qr:
+        return '将二维码对准框内，自动识别';
+      case ScanMode.barcode:
+        return '将条形码对准框内，自动识别';
+      case ScanMode.bind:
+        return _bindStep == _BindStep.device
+            ? '第1步/共2步：请扫描设备二维码'
+            : '第2步/共2步：请扫描流量卡条形码';
+    }
+  }
+
+  Widget _buildNormalPanel() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('识别结果', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Text(
+            _extractedNumber ?? _getResultHint(),
+            textAlign: TextAlign.center,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+              fontWeight: FontWeight.bold,
+              color: _extractedNumber != null ? Colors.green : Colors.grey,
+              fontFamily: 'monospace',
+              letterSpacing: 1,
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        if (_currentMode == ScanMode.iccid)
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _isProcessing ? null : _takePictureAndRecognize,
+              icon: const Icon(Icons.camera_alt),
+              label: Text(_isProcessing ? '识别中...' : '拍照识别'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                backgroundColor: Colors.blue,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          )
+        else
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: null,
+              icon: const Icon(Icons.radar),
+              label: Text(_extractedNumber != null ? '识别成功' : '扫描中...'),
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                backgroundColor: Colors.blueGrey.shade200,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: Colors.blueGrey.shade200,
+                disabledForegroundColor: Colors.white,
+              ),
+            ),
+          ),
+        if (_extractedNumber != null) ...[
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _saveRecord,
+                  icon: const Icon(Icons.save),
+                  label: const Text('保存'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    backgroundColor: Colors.green,
+                    foregroundColor: Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              ElevatedButton.icon(
+                onPressed: _resetResult,
+                icon: const Icon(Icons.refresh),
+                label: const Text('重新扫描'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  String _getResultHint() {
+    switch (_currentMode) {
+      case ScanMode.iccid:
+        return '点击下方按钮拍照识别';
+      case ScanMode.qr:
+        return '将二维码对准框内，自动识别';
+      case ScanMode.barcode:
+        return '将条形码对准框内，自动识别';
+      case ScanMode.bind:
+        return '请先扫描设备二维码';
+    }
+  }
+
+  /// 扫描区域叠加层
   Widget _buildScanOverlay() {
     final double width;
     final double height;
@@ -1268,7 +1008,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         break;
     }
 
-    final bool showScanLine = _isStreaming && _currentMode != ScanMode.iccid;
+    final bool showScanLine = _currentMode != ScanMode.iccid;
     final Color dimColor = Colors.black.withValues(alpha: 0.35);
 
     return LayoutBuilder(
@@ -1282,23 +1022,11 @@ class _ScannerScreenState extends State<ScannerScreen>
 
         return Stack(
           children: [
-            // 取景框四周压暗，突出识别区域
-            Positioned(
-              left: 0, top: 0, right: 0, height: top,
-              child: ColoredBox(color: dimColor),
-            ),
-            Positioned(
-              left: 0, top: bottom, right: 0, height: maxH - bottom,
-              child: ColoredBox(color: dimColor),
-            ),
-            Positioned(
-              left: 0, top: top, width: left, height: height,
-              child: ColoredBox(color: dimColor),
-            ),
-            Positioned(
-              left: right, top: top, width: maxW - right, height: height,
-              child: ColoredBox(color: dimColor),
-            ),
+            // 取景框四周压暗
+            Positioned(left: 0, top: 0, right: 0, height: top, child: ColoredBox(color: dimColor)),
+            Positioned(left: 0, top: bottom, right: 0, height: maxH - bottom, child: ColoredBox(color: dimColor)),
+            Positioned(left: 0, top: top, width: left, height: height, child: ColoredBox(color: dimColor)),
+            Positioned(left: right, top: top, width: maxW - right, height: height, child: ColoredBox(color: dimColor)),
             // 取景框
             Positioned(
               left: left,
@@ -1312,7 +1040,7 @@ class _ScannerScreenState extends State<ScannerScreen>
                 ),
               ),
             ),
-            // 动态扫描线（仅在实时扫描时显示）
+            // 动态扫描线
             if (showScanLine)
               Positioned(
                 left: left + 4,
@@ -1351,35 +1079,6 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
-  /// 底部提示文字
-  String _getScanHint() {
-    switch (_currentMode) {
-      case ScanMode.iccid:
-        return '将ICCID对准框内，保持约10~20cm距离，点击拍照';
-      case ScanMode.qr:
-        return '将二维码对准框内，自动识别';
-      case ScanMode.barcode:
-        return '将条形码对准框内，自动识别';
-      case ScanMode.bind:
-        return _bindStep == _BindStep.device
-            ? '第1步/共2步：请扫描设备二维码'
-            : '第2步/共2步：请扫描流量卡条形码';
-    }
-  }
-
-  String _getResultHint() {
-    switch (_currentMode) {
-      case ScanMode.iccid:
-        return '点击下方按钮拍照识别';
-      case ScanMode.qr:
-        return '将二维码对准框内，自动识别';
-      case ScanMode.barcode:
-        return '将条形码对准框内，自动识别';
-      case ScanMode.bind:
-        return '请先扫描设备二维码';
-    }
-  }
-
   /// 绑定模式操作面板
   Widget _buildBindPanel() {
     final theme = Theme.of(context);
@@ -1392,7 +1091,6 @@ class _ScannerScreenState extends State<ScannerScreen>
           Text('设备绑定', style: theme.textTheme.titleSmall),
           const SizedBox(height: 8),
           _buildBindWarning(),
-          // 重扫设备时保留已识别的流量卡，不丢失条形码结果
           if (_extractedNumber != null) ...[
             _buildBindValueRow('流量卡(保留)', _extractedNumber!, highlight: true),
             const SizedBox(height: 8),
@@ -1409,7 +1107,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             child: ElevatedButton.icon(
               onPressed: null,
               icon: const Icon(Icons.radar),
-              label: Text(_isStreaming ? '扫描中...' : '扫描已暂停'),
+              label: const Text('扫描中...'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 backgroundColor: Colors.blueGrey.shade200,
@@ -1423,7 +1121,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       );
     }
 
-    // 第2步：自动扫描流量卡条形码（设备码已识别，无需点击下一步）
+    // 第2步：自动扫描流量卡条形码
     if (_extractedNumber == null) {
       return Column(
         mainAxisSize: MainAxisSize.min,
@@ -1450,7 +1148,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             child: ElevatedButton.icon(
               onPressed: null,
               icon: const Icon(Icons.radar),
-              label: Text(_isStreaming ? '扫描中...' : '扫描已暂停'),
+              label: const Text('扫描中...'),
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 backgroundColor: Colors.blueGrey.shade200,
@@ -1464,7 +1162,7 @@ class _ScannerScreenState extends State<ScannerScreen>
       );
     }
 
-    // 完成：确认绑定，设备码/卡号均可单独重扫
+    // 完成：确认绑定
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -1503,7 +1201,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     );
   }
 
-  /// 绑定重复提示横幅（设备已存在 / 流量卡已存在）
+  /// 绑定重复提示横幅
   Widget _buildBindWarning() {
     final warning = _bindWarning;
     if (warning == null) return const SizedBox.shrink();
@@ -1531,7 +1229,8 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   /// 绑定步骤指示器
-  Widget _buildStepIndicator({required int activeStep}) {    return Row(
+  Widget _buildStepIndicator({required int activeStep}) {
+    return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         _buildStepDot(1, activeStep >= 1),

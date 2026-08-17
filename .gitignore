@@ -40,6 +40,9 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Build outputs
+/dist/
+
 # Android
 **/android/.gradle
 **/android/captures/
