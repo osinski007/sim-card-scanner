@@ -190,22 +190,10 @@ class _ScannerScreenState extends State<ScannerScreen>
         BarcodeFormat.code93,
         BarcodeFormat.ean13,
         BarcodeFormat.ean8,
-        BarcodeFormat.upca,
-        BarcodeFormat.upce,
         BarcodeFormat.pdf417,
         BarcodeFormat.codabar,
         BarcodeFormat.itf,
       ],
-      // mobile_scanner 内置优化
-      autoCorrect: true, // 自动校正倾斜条码
-    );
-
-    // 监听扫码结果
-    _scannerController!.barcodeStream.listen(
-      _handleBarcodeResult,
-      onError: (error) {
-        debugPrint('扫码错误: $error');
-      },
     );
   }
 
@@ -214,7 +202,7 @@ class _ScannerScreenState extends State<ScannerScreen>
     if (_isProcessing) return;
     if (_extractedNumber != null && _currentMode != ScanMode.bind) return;
 
-    final barcode = capture.barcaces.first;
+    final barcode = capture.barcodes.first;
     final rawValue = barcode.rawValue;
     if (rawValue == null || rawValue.isEmpty) return;
 
@@ -858,12 +846,6 @@ class _ScannerScreenState extends State<ScannerScreen>
       controller: _scannerController!,
       onDetect: _handleBarcodeResult,
       overlay: _buildScanOverlay(),
-      placeholder: Container(
-        color: Colors.black,
-        child: const Center(
-          child: CircularProgressIndicator(color: Colors.white),
-        ),
-      ),
     );
   }
 
