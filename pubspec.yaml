@@ -1,7 +1,7 @@
 name: sim_card_scanner
 description: 流量卡编号扫描工具 - 支持批量扫描和本地存储
 publish_to: 'none'
-version: 1.1.0+2
+version: 1.1.0+3
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

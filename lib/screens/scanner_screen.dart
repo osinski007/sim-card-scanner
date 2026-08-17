@@ -257,15 +257,8 @@ class _ScannerScreenState extends State<ScannerScreen>
       },
     );
 
-    // 进入扫码模式后立即自动放大到80%，无需等待检测到条码
-    Future.delayed(const Duration(milliseconds: 500), () {
-      if (mounted && !_isAutoZooming && _zoomScale < 0.8) {
-        _isAutoZooming = true;
-        _smoothZoomTo(0.8).whenComplete(() {
-          _isAutoZooming = false;
-        });
-      }
-    });
+    // 进入扫码模式后立即自动放大
+    _startAutoZoom();
   }
 
   /// 处理扫码结果
@@ -357,6 +350,19 @@ class _ScannerScreenState extends State<ScannerScreen>
     });
 
     HapticFeedback.mediumImpact();
+  }
+
+  /// 自动放大到 80%（扫码启动/重置后调用）
+  void _startAutoZoom() {
+    if (_currentMode == ScanMode.iccid || _scannerController == null) return;
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && !_isAutoZooming && _zoomScale < 0.8) {
+        _isAutoZooming = true;
+        _smoothZoomTo(0.8).whenComplete(() {
+          _isAutoZooming = false;
+        });
+      }
+    });
   }
 
   /// 自动放大 — 检测到条码时平滑放大到 80%，无需手动操作
@@ -567,7 +573,10 @@ class _ScannerScreenState extends State<ScannerScreen>
       debugPrint('识别错误: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('识别失败: $e')),
+          SnackBar(
+            content: Text('识别失败: $e'),
+            duration: const Duration(seconds: 2),
+          ),
         );
       }
     }
@@ -620,6 +629,7 @@ class _ScannerScreenState extends State<ScannerScreen>
         content: Text(message),
         backgroundColor: Colors.orange.shade700,
         behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
       ),
     );
   }
@@ -636,12 +646,13 @@ class _ScannerScreenState extends State<ScannerScreen>
       if (_currentMode == ScanMode.bind) {
         _bindingDeviceCode = null;
         _bindStep = _BindStep.device;
-        // 重新启动扫描
         _scannerController?.start();
       } else {
         _scannerController?.start();
       }
     });
+
+    _startAutoZoom();
   }
 
   /// 绑定模式：仅重新扫描设备二维码
@@ -652,7 +663,11 @@ class _ScannerScreenState extends State<ScannerScreen>
       _bindingDeviceCode = null;
       _bindWarning = null;
       _bindStep = _BindStep.device;
+      _zoomScale = 0.0;
+      _isAutoZooming = false;
     });
+
+    _startAutoZoom();
   }
 
   /// 绑定模式：仅重新扫描流量卡条形码
@@ -663,7 +678,11 @@ class _ScannerScreenState extends State<ScannerScreen>
       _extractedNumber = null;
       _recognizedText = null;
       _bindWarning = null;
+      _zoomScale = 0.0;
+      _isAutoZooming = false;
     });
+
+    _startAutoZoom();
   }
 
   /// 绑定模式：确认绑定设备与流量卡
@@ -688,6 +707,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             content: const Text('绑定成功'),
             backgroundColor: Colors.green,
             behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
             action: SnackBarAction(
               label: '查看记录',
               textColor: Colors.white,
@@ -703,6 +723,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             content: Text('该设备已更新绑定（替换旧卡）'),
             backgroundColor: Colors.blue,
             behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 2),
           ),
         );
         _resetResult();
@@ -764,6 +785,7 @@ class _ScannerScreenState extends State<ScannerScreen>
           content: Text('已保存: $_extractedNumber'),
           backgroundColor: Colors.green,
           behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
           action: SnackBarAction(
             label: '查看记录',
             textColor: Colors.white,
