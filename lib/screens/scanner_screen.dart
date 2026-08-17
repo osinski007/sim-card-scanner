@@ -61,10 +61,7 @@ class _ScannerScreenState extends State<ScannerScreen>
 
   // 缩放和对焦控制
   double _zoomScale = 0.0;
-  double _minZoomScale = 0.0;
-  double _maxZoomScale = 0.0;
   bool _isAutoZooming = false;
-  Offset? _focusPoint;
 
   // 取景框扫描线动画
   late final AnimationController _scanLineController = AnimationController(
@@ -249,10 +246,8 @@ class _ScannerScreenState extends State<ScannerScreen>
     debugPrint('📱 mobile_scanner 初始化: ${DateTime.now().difference(scanStart).inMilliseconds}ms');
 
     // mobile_scanner 4.0.1: zoomScaleState 范围 0.0-1.0
-    _minZoomScale = 0.0;
-    _maxZoomScale = 1.0;
     _zoomScale = _scannerController!.zoomScaleState.value;
-    debugPrint('🔍 缩放范围: $_minZoomScale - $_maxZoomScale, 当前: $_zoomScale');
+    debugPrint('🔍 当前缩放: $_zoomScale');
 
     // 监听扫码结果
     _scannerController!.barcodes.listen(
@@ -261,6 +256,16 @@ class _ScannerScreenState extends State<ScannerScreen>
         debugPrint('扫码错误: $error');
       },
     );
+
+    // 进入扫码模式后立即自动放大到80%，无需等待检测到条码
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && !_isAutoZooming && _zoomScale < 0.8) {
+        _isAutoZooming = true;
+        _smoothZoomTo(0.8).whenComplete(() {
+          _isAutoZooming = false;
+        });
+      }
+    });
   }
 
   /// 处理扫码结果
@@ -354,58 +359,40 @@ class _ScannerScreenState extends State<ScannerScreen>
     HapticFeedback.mediumImpact();
   }
 
-  /// 自动放大和对焦到检测到的条形码
+  /// 自动放大 — 检测到条码时平滑放大到 80%，无需手动操作
   void _autoZoomAndFocus(BarcodeCapture capture, Barcode barcode) {
-    if (_isAutoZooming || _maxZoomScale == 0) return;
+    if (_isAutoZooming) return;
 
-    final corners = barcode.corners;
-    if (corners.isEmpty) return;
-
-    double centerX = 0;
-    double centerY = 0;
-    for (final corner in corners) {
-      centerX += corner.dx;
-      centerY += corner.dy;
-    }
-    centerX /= corners.length;
-    centerY /= corners.length;
-
-    final normalizedX = centerX / capture.size.width;
-    final normalizedY = centerY / capture.size.height;
-
-    debugPrint('🎯 条形码位置: ($normalizedX, $normalizedY)');
-
-    // mobile_scanner 4.0.1: zoomScaleState 范围 0.0-1.0，当前缩放低于 0.7 时自动放大
     _zoomScale = _scannerController!.zoomScaleState.value;
-    if (_zoomScale < _maxZoomScale * 0.7) {
-      _isAutoZooming = true;
+    // 已经在高缩放级别则跳过
+    if (_zoomScale >= 0.8) return;
 
-      final targetZoom = _zoomScale + (_maxZoomScale - _zoomScale) * 0.3;
-      _smoothZoomTo(targetZoom);
-
-      Future.delayed(const Duration(milliseconds: 1500), () {
-        _isAutoZooming = false;
-      });
-    }
+    _isAutoZooming = true;
+    _smoothZoomTo(0.8).whenComplete(() {
+      _isAutoZooming = false;
+    });
   }
 
-  /// 平滑缩放到指定级别
+  /// 平滑缩放到指定级别（5步快速动画）
   Future<void> _smoothZoomTo(double targetZoom) async {
     if (_scannerController == null) return;
 
-    final steps = 10;
-    final stepSize = (targetZoom - _zoomScale) / steps;
+    final steps = 5;
+    final startZoom = _zoomScale;
+    final stepSize = (targetZoom - startZoom) / steps;
 
     for (int i = 0; i < steps; i++) {
-      final newZoom = _zoomScale + stepSize * (i + 1);
-      final clampedZoom = newZoom.clamp(_minZoomScale, _maxZoomScale);
+      final newZoom = startZoom + stepSize * (i + 1);
+      final clampedZoom = newZoom.clamp(0.0, 1.0);
 
       try {
         await _scannerController!.setZoomScale(clampedZoom);
-        setState(() {
-          _zoomScale = clampedZoom;
-        });
-        await Future.delayed(const Duration(milliseconds: 50));
+        if (mounted) {
+          setState(() {
+            _zoomScale = clampedZoom;
+          });
+        }
+        await Future.delayed(const Duration(milliseconds: 30));
       } catch (e) {
         debugPrint('缩放失败: $e');
         break;
@@ -986,96 +973,6 @@ class _ScannerScreenState extends State<ScannerScreen>
           onDetect: _handleBarcodeResult,
           overlay: _buildScanOverlay(),
         ),
-
-        // 缩放控制按钮
-        if (_maxZoomScale > 0)
-          Positioned(
-            right: 16,
-            top: 100,
-            child: Column(
-              children: [
-                // 放大按钮
-                FloatingActionButton.small(
-                  heroTag: 'zoom_in',
-                  backgroundColor: Colors.white.withOpacity(0.8),
-                  onPressed: _zoomScale < _maxZoomScale ? () => _zoomIn() : null,
-                  child: const Icon(Icons.zoom_in, color: Colors.black87),
-                ),
-                const SizedBox(height: 8),
-
-                // 缩放指示器
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.8),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    '${(_zoomScale * 100).toStringAsFixed(0)}%',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.black87,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 8),
-
-                // 缩小按钮
-                FloatingActionButton.small(
-                  heroTag: 'zoom_out',
-                  backgroundColor: Colors.white.withOpacity(0.8),
-                  onPressed: _zoomScale > _minZoomScale ? () => _zoomOut() : null,
-                  child: const Icon(Icons.zoom_out, color: Colors.black87),
-                ),
-                const SizedBox(height: 8),
-
-                // 重置缩放按钮
-                FloatingActionButton.small(
-                  heroTag: 'zoom_reset',
-                  backgroundColor: Colors.blue.withOpacity(0.8),
-                  onPressed: () => _resetZoom(),
-                  child: const Icon(Icons.center_focus_strong, color: Colors.white, size: 16),
-                ),
-              ],
-            ),
-          ),
-
-        // 自动缩放提示
-        if (_isAutoZooming)
-          Positioned(
-            left: 16,
-            top: 100,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.green.withOpacity(0.8),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                    ),
-                  ),
-                  SizedBox(width: 8),
-                  Text(
-                    '自动对焦中...',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
       ],
     );
   }
@@ -1514,62 +1411,5 @@ class _ScannerScreenState extends State<ScannerScreen>
         ],
       ),
     );
-  }
-
-  /// 放大
-  Future<void> _zoomIn() async {
-    if (_scannerController == null || _isAutoZooming) return;
-
-    final newZoom = (_zoomScale + 0.1).clamp(_minZoomScale, _maxZoomScale);
-    try {
-      await _scannerController!.setZoomScale(newZoom);
-      setState(() {
-        _zoomScale = newZoom;
-      });
-      HapticFeedback.lightImpact();
-    } catch (e) {
-      debugPrint('放大失败: $e');
-    }
-  }
-
-  /// 缩小
-  Future<void> _zoomOut() async {
-    if (_scannerController == null || _isAutoZooming) return;
-
-    final newZoom = (_zoomScale - 0.1).clamp(_minZoomScale, _maxZoomScale);
-    try {
-      await _scannerController!.setZoomScale(newZoom);
-      setState(() {
-        _zoomScale = newZoom;
-      });
-      HapticFeedback.lightImpact();
-    } catch (e) {
-      debugPrint('缩小失败: $e');
-    }
-  }
-
-  /// 重置缩放
-  Future<void> _resetZoom() async {
-    if (_scannerController == null) return;
-
-    try {
-      await _scannerController!.setZoomScale(_minZoomScale);
-      setState(() {
-        _zoomScale = _minZoomScale;
-        _isAutoZooming = false;
-      });
-      HapticFeedback.mediumImpact();
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('缩放已重置'),
-            duration: Duration(seconds: 1),
-          ),
-        );
-      }
-    } catch (e) {
-      debugPrint('重置缩放失败: $e');
-    }
   }
 }
