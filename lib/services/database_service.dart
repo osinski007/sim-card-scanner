@@ -312,7 +312,8 @@ class DatabaseService {
   /// 以文本形式导出单元格，防止长数字（ICCID/设备码）被 Excel 解析为科学计数法。
   /// 使用 `="值"` 公式形式让 Excel 始终当作文本处理。
   String _csvAsText(String value) {
-    return '"=${value.replaceAll('"', '""')}"';
+    final escaped = value.replaceAll('"', '""');
+    return '"=""$escaped"""';
   }
 
   /// CSV 字段转义

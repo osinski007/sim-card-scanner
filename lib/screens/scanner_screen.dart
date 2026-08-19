@@ -708,6 +708,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             backgroundColor: Colors.green,
             behavior: SnackBarBehavior.floating,
             duration: const Duration(seconds: 2),
+            margin: const EdgeInsets.only(top: 80, left: 16, right: 16),
             action: SnackBarAction(
               label: '查看记录',
               textColor: Colors.white,
@@ -724,6 +725,7 @@ class _ScannerScreenState extends State<ScannerScreen>
             backgroundColor: Colors.blue,
             behavior: SnackBarBehavior.floating,
             duration: Duration(seconds: 2),
+            margin: EdgeInsets.only(top: 80, left: 16, right: 16),
           ),
         );
         _resetResult();
@@ -786,6 +788,7 @@ class _ScannerScreenState extends State<ScannerScreen>
           backgroundColor: Colors.green,
           behavior: SnackBarBehavior.floating,
           duration: const Duration(seconds: 2),
+          margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
           action: SnackBarAction(
             label: '查看记录',
             textColor: Colors.white,
